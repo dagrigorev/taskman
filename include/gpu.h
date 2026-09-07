@@ -125,4 +125,45 @@ typedef struct {
    back to naming adapters by LUID rather than hiding them. */
 int Gpu_DescribeAdapters(GpuAdapterInfo *out, int max);
 
+#define GPU_HISTORY             128
+/* Set from the Task 1 measurement: a native collection costs 1.25 ms at
+   1029 instances, comfortably inside the 10 ms budget, so one second. */
+#define GPU_COLLECT_INTERVAL_MS 1000
+
+typedef struct {
+    ULONGLONG luid;
+    WCHAR     name[GPU_NAME_MAX];
+    BOOL      nameKnown;
+    double    utilization;
+    double    engine[GPU_ENGINE_KINDS];
+    ULONGLONG dedicatedUsed;                /* from the PDH memory counter */
+    ULONGLONG dedicatedTotal, sharedTotal;  /* from DXGI                   */
+    float     history[GPU_HISTORY];
+    int       head, count;
+} GpuAdapter;
+
+/* Published from the UI thread with an interlocked store; the collector
+   never reads g_cfg. Defaults to FALSE so no PDH query is opened until
+   the Sensors tab or the per-process column asks for data. */
+void Gpu_SetEnabled(BOOL enabled);
+BOOL Gpu_IsEnabled(void);
+
+/* Called on the collector thread, before the per-tab collectors. Does
+   nothing at all when disabled, and rate-limits itself to
+   GPU_COLLECT_INTERVAL_MS regardless of the update speed. */
+void Gpu_Collect(ULONGLONG nowTick);
+
+/* Shared read lock over the published model. Always returns a valid
+   pointer; *count may be 0. */
+const GpuAdapter *Gpu_Lock(int *count);
+void Gpu_Unlock(void);
+
+/* Writes that pid's utilisation and returns 1, or returns 0 and leaves
+   *out untouched when the pid has no GPU usage this sample. */
+int Gpu_ProcessUsage(DWORD pid, double *out);
+
+/* Frees the model and closes the query. Call after the collector has been
+   joined, as the other per-tab models already require. */
+void Gpu_Reset(void);
+
 #endif /* CTM_GPU_H */

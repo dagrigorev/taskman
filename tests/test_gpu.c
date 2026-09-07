@@ -290,6 +290,42 @@ static void TestAggregateResetClears(void)
     CHECK(adapters[0].utilization > 9.9 && adapters[0].utilization < 10.1);
 }
 
+/* Enabled state crosses the UI/collector boundary, so it must be readable
+   without holding any lock and must default to off -- nothing should pay
+   the enumeration cost until something asks for the data. */
+static void TestEnabledFlag(void)
+{
+    CHECK(Gpu_IsEnabled() == FALSE);
+    Gpu_SetEnabled(TRUE);
+    CHECK(Gpu_IsEnabled() == TRUE);
+    Gpu_SetEnabled(FALSE);
+    CHECK(Gpu_IsEnabled() == FALSE);
+}
+
+/* Collecting while disabled must not open a query or publish anything. */
+static void TestCollectSkippedWhenDisabled(void)
+{
+    int count = -1;
+    const GpuAdapter *model;
+
+    Gpu_SetEnabled(FALSE);
+    Gpu_Collect(GetTickCount64());
+    model = Gpu_Lock(&count);
+    CHECK(count == 0);
+    CHECK(model != NULL);        /* a valid empty model, never NULL */
+    Gpu_Unlock();
+    Gpu_Reset();
+}
+
+/* An unknown pid reports no usage rather than a stale or zero reading. */
+static void TestProcessUsageUnknownPid(void)
+{
+    double value = 123.0;
+    Gpu_Reset();
+    CHECK(Gpu_ProcessUsage(0xFFFFFFFEu, &value) == 0);
+    CHECK(value == 123.0);       /* untouched on a miss */
+}
+
 int main(void)
 {
     CHECK(GPU_ENGINE_KINDS == 7);
@@ -309,6 +345,9 @@ int main(void)
     TestAggregateMemoryOnlyAdapter();
     TestAggregateMemoryTakesMaxNode();
     TestAggregateResetClears();
+    TestEnabledFlag();
+    TestCollectSkippedWhenDisabled();
+    TestProcessUsageUnknownPid();
     printf("gpu: %d failures\n", failures);
     return failures ? 1 : 0;
 }

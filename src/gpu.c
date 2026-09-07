@@ -388,3 +388,132 @@ int Gpu_DescribeAdapters(GpuAdapterInfo *out, int max)
        breath has historically been unstable, and the module is tiny. */
     return count;
 }
+
+static SRWLOCK          s_lock = SRWLOCK_INIT;
+static GpuAdapter       s_model[GPU_MAX_ADAPTERS];
+static int              s_modelCount;
+static GpuProcessSample s_processes[GPU_MAX_PROCESSES];
+static int              s_processCount;
+static volatile LONG    s_enabled;
+static ULONGLONG        s_lastCollect;
+static GpuAccumulator   s_accum;   /* ~14 KB: static, not on the stack */
+
+void Gpu_SetEnabled(BOOL enabled)
+{
+    InterlockedExchange(&s_enabled, enabled ? 1 : 0);
+}
+
+BOOL Gpu_IsEnabled(void)
+{
+    return InterlockedCompareExchange(&s_enabled, 0, 0) != 0;
+}
+
+/* Merges one sample into the persistent model, preserving each adapter's
+   history ring across samples -- which is why the sample and the model are
+   separate types rather than one struct reused. */
+static void GpuPublish(const GpuAdapterSample *samples, int sampleCount,
+                       const GpuAdapterInfo *info, int infoCount)
+{
+    GpuAdapter merged[GPU_MAX_ADAPTERS];
+    int i, j;
+
+    ZeroMemory(merged, sizeof(merged));
+    for (i = 0; i < sampleCount && i < GPU_MAX_ADAPTERS; ++i) {
+        merged[i].luid = samples[i].luid;
+        merged[i].utilization = samples[i].utilization;
+        merged[i].dedicatedUsed = samples[i].dedicatedUsed;
+        CopyMemory(merged[i].engine, samples[i].engine, sizeof(merged[i].engine));
+
+        for (j = 0; j < infoCount; ++j) {
+            if (info[j].luid != samples[i].luid) continue;
+            lstrcpynW(merged[i].name, info[j].name, GPU_NAME_MAX);
+            merged[i].nameKnown = TRUE;
+            merged[i].dedicatedTotal = info[j].dedicatedTotal;
+            merged[i].sharedTotal    = info[j].sharedTotal;
+            break;
+        }
+        if (!merged[i].nameKnown)
+            Gpu_FormatLuid(samples[i].luid, merged[i].name, GPU_NAME_MAX);
+
+        /* Carry the ring forward from the previous model entry for this
+           adapter, so a graph is not reset every sample. */
+        for (j = 0; j < s_modelCount; ++j) {
+            if (s_model[j].luid != samples[i].luid) continue;
+            CopyMemory(merged[i].history, s_model[j].history, sizeof(merged[i].history));
+            merged[i].head  = s_model[j].head;
+            merged[i].count = s_model[j].count;
+            break;
+        }
+        merged[i].history[merged[i].head] = (float)samples[i].utilization;
+        merged[i].head = (merged[i].head + 1) % GPU_HISTORY;
+        if (merged[i].count < GPU_HISTORY) merged[i].count++;
+    }
+
+    AcquireSRWLockExclusive(&s_lock);
+    CopyMemory(s_model, merged, sizeof(s_model));
+    s_modelCount = (sampleCount < GPU_MAX_ADAPTERS) ? sampleCount : GPU_MAX_ADAPTERS;
+    ReleaseSRWLockExclusive(&s_lock);
+}
+
+void Gpu_Collect(ULONGLONG nowTick)
+{
+    GpuAdapterSample samples[GPU_MAX_ADAPTERS];
+    GpuAdapterInfo   info[GPU_MAX_ADAPTERS];
+    int sampleCount, infoCount, processCount;
+
+    if (!Gpu_IsEnabled()) return;
+    if (s_lastCollect && nowTick - s_lastCollect < GPU_COLLECT_INTERVAL_MS) return;
+    if (!Gpu_QueryOpen()) return;
+
+    Gpu_AccumReset(&s_accum);
+    if (!Gpu_QuerySample(&s_accum, nowTick)) return;  /* priming, or no data */
+    s_lastCollect = nowTick;
+
+    sampleCount  = Gpu_AccumAdapters(&s_accum, samples, GPU_MAX_ADAPTERS);
+    infoCount    = Gpu_DescribeAdapters(info, GPU_MAX_ADAPTERS);
+    processCount = Gpu_AccumProcesses(&s_accum, s_processes, GPU_MAX_PROCESSES);
+
+    AcquireSRWLockExclusive(&s_lock);
+    s_processCount = processCount;
+    ReleaseSRWLockExclusive(&s_lock);
+
+    GpuPublish(samples, sampleCount, info, infoCount);
+}
+
+const GpuAdapter *Gpu_Lock(int *count)
+{
+    AcquireSRWLockShared(&s_lock);
+    if (count) *count = s_modelCount;
+    return s_model;
+}
+
+void Gpu_Unlock(void)
+{
+    ReleaseSRWLockShared(&s_lock);
+}
+
+int Gpu_ProcessUsage(DWORD pid, double *out)
+{
+    int i, found = 0;
+    if (!out) return 0;
+    AcquireSRWLockShared(&s_lock);
+    for (i = 0; i < s_processCount; ++i) {
+        if (s_processes[i].pid != pid) continue;
+        *out = s_processes[i].utilization;
+        found = 1;
+        break;
+    }
+    ReleaseSRWLockShared(&s_lock);
+    return found;
+}
+
+void Gpu_Reset(void)
+{
+    Gpu_QueryClose();
+    AcquireSRWLockExclusive(&s_lock);
+    ZeroMemory(s_model, sizeof(s_model));
+    s_modelCount = 0;
+    s_processCount = 0;
+    ReleaseSRWLockExclusive(&s_lock);
+    s_lastCollect = 0;
+}
