@@ -7,6 +7,9 @@
 #include <strsafe.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include <pdh.h>
+/* PDH_MORE_DATA and the PDH_CSTATUS_* values live here, not in pdh.h. */
+#include <pdhmsg.h>
 
 /* Returns the text just past `marker`, or NULL when it does not occur.
    Note "_eng_" cannot match inside "_engtype_", which reads "_engt". */
@@ -222,4 +225,120 @@ int Gpu_AccumProcesses(const GpuAccumulator *acc, GpuProcessSample *out, int max
         ++count;
     }
     return count;
+}
+
+/* Wildcard counters do NOT pick up instances created after the counter was
+   added, so a process that starts later never appears. Re-adding the
+   counter on this interval bounds how long a newly launched application
+   stays invisible, without paying re-expansion on every sample. */
+#define GPU_REBUILD_INTERVAL_MS 10000
+
+static PDH_HQUERY   s_query;
+static PDH_HCOUNTER s_engine;
+static PDH_HCOUNTER s_memory;
+static BOOL         s_primed;      /* a first collection has happened     */
+static ULONGLONG    s_builtTick;
+
+static BOOL GpuAddCounters(void)
+{
+    /* English names, NOT PdhAddCounterW: the plain variant takes localised
+       counter names and finds nothing at all on a non-English Windows. */
+    if (PdhAddEnglishCounterW(s_query, L"\\GPU Engine(*)\\Utilization Percentage",
+                              0, &s_engine) != ERROR_SUCCESS)
+        return FALSE;
+    /* Memory is optional: an adapter list with utilisation but no memory is
+       still useful, so a missing counter must not fail the whole query. */
+    if (PdhAddEnglishCounterW(s_query, L"\\GPU Adapter Memory(*)\\Dedicated Usage",
+                              0, &s_memory) != ERROR_SUCCESS)
+        s_memory = NULL;
+    return TRUE;
+}
+
+BOOL Gpu_QueryOpen(void)
+{
+    if (s_query) return TRUE;
+    if (PdhOpenQueryW(NULL, 0, &s_query) != ERROR_SUCCESS) { s_query = NULL; return FALSE; }
+    if (!GpuAddCounters()) { PdhCloseQuery(s_query); s_query = NULL; return FALSE; }
+    s_primed = FALSE;
+    s_builtTick = GetTickCount64();
+    return TRUE;
+}
+
+void Gpu_QueryClose(void)
+{
+    if (s_query) PdhCloseQuery(s_query);   /* also releases its counters */
+    s_query = NULL;
+    s_engine = NULL;
+    s_memory = NULL;
+    s_primed = FALSE;
+    s_builtTick = 0;
+}
+
+BOOL Gpu_QuerySample(GpuAccumulator *acc, ULONGLONG nowTick)
+{
+    DWORD size = 0, count = 0, i;
+    PDH_FMT_COUNTERVALUE_ITEM_W *items;
+    PDH_STATUS status;
+
+    if (!s_query || !acc) return FALSE;
+
+    /* Pick up adapters and processes that appeared since the last rebuild. */
+    if (s_primed && nowTick - s_builtTick >= GPU_REBUILD_INTERVAL_MS) {
+        PdhRemoveCounter(s_engine);
+        s_engine = NULL;
+        if (s_memory) { PdhRemoveCounter(s_memory); s_memory = NULL; }
+        if (!GpuAddCounters()) { Gpu_QueryClose(); return FALSE; }
+        s_builtTick = nowTick;
+        s_primed = FALSE;         /* the fresh counter needs priming again */
+    }
+
+    if (PdhCollectQueryData(s_query) != ERROR_SUCCESS) return FALSE;
+    if (!s_primed) { s_primed = TRUE; return FALSE; }   /* rate counter */
+
+    status = PdhGetFormattedCounterArrayW(s_engine, PDH_FMT_DOUBLE, &size, &count, NULL);
+    /* PDH_STATUS is signed on MinGW while PDH_MORE_DATA expands unsigned;
+       compare in the status type so -Wsign-compare stays quiet. */
+    if (status != (PDH_STATUS)PDH_MORE_DATA || size == 0) return FALSE;
+    items = (PDH_FMT_COUNTERVALUE_ITEM_W *)malloc(size);
+    if (!items) return FALSE;
+    status = PdhGetFormattedCounterArrayW(s_engine, PDH_FMT_DOUBLE, &size, &count, items);
+    if (status != ERROR_SUCCESS) { free(items); return FALSE; }
+
+    for (i = 0; i < count; ++i) {
+        GpuInstance instance;
+        if (items[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA &&
+            items[i].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+        if (!Gpu_ParseEngineInstance(items[i].szName, &instance)) continue;
+        Gpu_AccumAdd(acc, &instance, items[i].FmtValue.doubleValue);
+    }
+    free(items);
+
+    /* Dedicated video memory, keyed by adapter. Its counter carries no pid
+       and no engine, so it needs its own instance parser. Absence is
+       tolerated: utilisation without memory is still a usable reading. */
+    if (s_memory) {
+        size = 0; count = 0;
+        status = PdhGetFormattedCounterArrayW(s_memory, PDH_FMT_LARGE, &size, &count, NULL);
+        if (status == (PDH_STATUS)PDH_MORE_DATA && size > 0) {
+            PDH_FMT_COUNTERVALUE_ITEM_W *memoryItems =
+                (PDH_FMT_COUNTERVALUE_ITEM_W *)malloc(size);
+            if (memoryItems) {
+                if (PdhGetFormattedCounterArrayW(s_memory, PDH_FMT_LARGE, &size,
+                                                 &count, memoryItems) == ERROR_SUCCESS) {
+                    for (i = 0; i < count; ++i) {
+                        ULONGLONG luid = 0;
+                        unsigned phys = 0;
+                        if (memoryItems[i].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA &&
+                            memoryItems[i].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+                        if (!Gpu_ParseMemoryInstance(memoryItems[i].szName, &luid, &phys)) continue;
+                        if (memoryItems[i].FmtValue.largeValue < 0) continue;
+                        Gpu_AccumMemory(acc, luid,
+                                        (ULONGLONG)memoryItems[i].FmtValue.largeValue);
+                    }
+                }
+                free(memoryItems);
+            }
+        }
+    }
+    return TRUE;
 }

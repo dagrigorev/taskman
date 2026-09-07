@@ -100,4 +100,17 @@ int Gpu_AccumProcesses(const GpuAccumulator *acc, GpuProcessSample *out, int max
    memory reading but no active engine still appear in Gpu_AccumAdapters. */
 BOOL Gpu_AccumMemory(GpuAccumulator *acc, ULONGLONG luid, ULONGLONG dedicatedUsed);
 
+/* Opens the PDH query and adds the wildcard counters. Returns FALSE when
+   GPU counters are unavailable (pre-1709, or the provider is disabled), in
+   which case every other query function is a safe no-op. */
+BOOL Gpu_QueryOpen(void);
+void Gpu_QueryClose(void);
+
+/* Collects one sample into `acc`, which the caller has already reset.
+   Returns FALSE when no usable value exists yet -- notably the first call
+   after opening, because Utilization Percentage is a rate counter and needs
+   two collections. `nowTick` is GetTickCount64(), used to decide when the
+   wildcard counters are rebuilt. */
+BOOL Gpu_QuerySample(GpuAccumulator *acc, ULONGLONG nowTick);
+
 #endif /* CTM_GPU_H */
