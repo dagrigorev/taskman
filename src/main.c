@@ -7,6 +7,7 @@
  * ------------------------------------------------------------------------ */
 #include "app.h"
 #include "ui.h"
+#include "gpu.h"
 
 /* --------------------------------------------------------------- state -- */
 
@@ -1583,6 +1584,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         Svc_Reset();
         Users_Reset();
         Net_Reset();
+        Gpu_Reset();
         TrayRemove();
         for (i = 0; i < TAB_COUNT; i++) {
             if (g_page[i] && g_page[i]->hwnd) {

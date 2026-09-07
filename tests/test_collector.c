@@ -1,4 +1,5 @@
 #include "../include/app.h"
+#include "../include/gpu.h"
 #include <stdio.h>
 
 static int eventCalls, failEvent, closeCalls, threadCalls, multipleWaits;
@@ -60,6 +61,18 @@ int main(void)
     int n;
     float history[4];
     float busy, kernel;
+    int gpuCount = -1;
+    /* Nothing should pay the PDH enumeration cost until the Sensors tab or
+       the per-process column asks for it: the flag defaults to off and a
+       collect while disabled must publish nothing. The ordering requirement
+       -- Gpu_Collect before g_tabCollect -- is NOT asserted here; it is a
+       statement about source order inside CollectorProc with no observable
+       effect until the per-process column exists. Verify it by reading. */
+    CHECK(Gpu_IsEnabled() == FALSE);
+    Gpu_Collect(GetTickCount64());
+    Gpu_Lock(&gpuCount);
+    Gpu_Unlock();
+    CHECK(gpuCount == 0);
     CpuPercent(120, 150, 50, 100, 100, 0, &busy, &kernel);
     CHECK(busy == 80 && kernel == 30);
     CpuPercent(0, 150, 50, 100, 100, 0, &busy, &kernel);

@@ -26,11 +26,11 @@ file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/tests/.build")
 
 taskman_add_test(test_settings)
 taskman_add_test(test_launch
-    ../src/ui.c ../src/settings.c ../src/sysinfo.c
+    ../src/ui.c ../src/settings.c ../src/sysinfo.c ../src/gpu.c
     ../src/tabs/tab_apps.c ../src/tabs/tab_processes.c
     ../src/tabs/tab_network.c ../src/tabs/tab_users.c ../src/tabs/proc_tree.c)
-taskman_add_test(test_collector)
-taskman_add_test(test_sysinfo_live ../src/sysinfo.c)
+taskman_add_test(test_collector ../src/gpu.c)
+taskman_add_test(test_sysinfo_live ../src/sysinfo.c ../src/gpu.c)
 taskman_add_test(test_processes ../src/tabs/proc_tree.c)
 taskman_add_test(test_apps)
 taskman_add_test(test_network)

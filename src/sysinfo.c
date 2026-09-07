@@ -8,6 +8,7 @@
  * ------------------------------------------------------------------------ */
 #include "app.h"
 #include "ntapi.h"
+#include "gpu.h"
 
 /* --------------------------------------------------------- native API --- */
 
@@ -336,6 +337,12 @@ static DWORD WINAPI CollectorProc(LPVOID param)
 
         HistoryPush((float)back->cpuUsage, (float)back->cpuKernel,
                     (float)back->memUsage);
+
+        /* Before the tab collectors: Proc_Collect reads the per-process
+           figures, and refreshing them afterwards would leave the Processes
+           tab a sample behind. Gpu_Collect returns immediately unless
+           something has enabled it. */
+        Gpu_Collect(GetTickCount64());
 
         if (g_tabCollect)
             g_tabCollect((int)InterlockedCompareExchange(&g_activeTab, 0, 0));
