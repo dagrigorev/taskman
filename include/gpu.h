@@ -37,4 +37,22 @@ typedef struct {
     GpuEngineKind kind;
 } GpuInstance;
 
+/* Maps a PDH engtype string to a kind. Unrecognised, empty and NULL all
+   classify as GPU_ENGINE_OTHER. */
+GpuEngineKind Gpu_ClassifyEngine(const WCHAR *engtype);
+
+/* Parses a \GPU Engine(...) instance name of the form
+   pid_<pid>_luid_0x<high>_0x<low>_phys_<n>_eng_<n>_engtype_<type>.
+   A missing or empty engtype still parses, classified as OTHER: dropping
+   the instance would understate its adapter's maximum. Returns FALSE only
+   when a required numeric field is absent or unparseable. */
+BOOL Gpu_ParseEngineInstance(const WCHAR *name, GpuInstance *out);
+
+/* Renders a LUID the way PDH does: lowercase, high half first. */
+void Gpu_FormatLuid(ULONGLONG luid, WCHAR *buf, size_t cch);
+
+/* Parses a \GPU Adapter Memory(...) instance name, which identifies only
+   the adapter: luid_0x<high>_0x<low>_phys_<n>. No pid, no engine fields. */
+BOOL Gpu_ParseMemoryInstance(const WCHAR *name, ULONGLONG *luid, unsigned *phys);
+
 #endif /* CTM_GPU_H */
