@@ -53,9 +53,9 @@ Refreshing or switching tabs while paused collects once. Rates are averages
 over the interval between adapter samples; disconnects and counter resets
 start a new baseline. Protected processes can expose fewer details.
 
-![1](.\images\1.png)
+![1](images/1.png)
 
-![2](.\images\2.png)
+![2](images/2.png)
 
 ---
 
