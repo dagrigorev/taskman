@@ -1,0 +1,53 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "BUILD_TESTING": true
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "msvc-release",
+      "displayName": "MSVC Release (developer environment)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_C_COMPILER": "cl", "CMAKE_RC_COMPILER": "rc", "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "msvc-debug",
+      "displayName": "MSVC Debug (developer environment)",
+      "inherits": "msvc-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "mingw-release",
+      "displayName": "MinGW-w64 Release",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_RC_COMPILER": "windres", "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "mingw-debug",
+      "displayName": "MinGW-w64 Debug",
+      "inherits": "mingw-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msvc-release", "configurePreset": "msvc-release" },
+    { "name": "msvc-debug", "configurePreset": "msvc-debug" },
+    { "name": "mingw-release", "configurePreset": "mingw-release" },
+    { "name": "mingw-debug", "configurePreset": "mingw-debug" }
+  ],
+  "testPresets": [
+    { "name": "msvc-release", "configurePreset": "msvc-release", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "msvc-debug", "configurePreset": "msvc-debug", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "mingw-release", "configurePreset": "mingw-release", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } },
+    { "name": "mingw-debug", "configurePreset": "mingw-debug", "output": { "outputOnFailure": true }, "execution": { "noTestsAction": "error" } }
+  ]
+}

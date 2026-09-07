@@ -1,0 +1,273 @@
+/* Exercise real windows and controls without writing settings or running tasks. */
+#include "../include/app.h"
+#include <stdio.h>
+static void IgnoreSettingsSave(void) {}
+#define Settings_Save IgnoreSettingsSave
+#include "../src/main.c"
+#undef Settings_Save
+
+static int failures;
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL workspace line %d: %s\n", __LINE__, #x); ++failures; } } while (0)
+
+static void Pump(DWORD duration)
+{
+    ULONGLONG until = GetTickCount64() + duration;
+    MSG msg;
+    do {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        Sleep(5);
+    } while (GetTickCount64() < until);
+}
+
+static void Capture(HWND hwnd, const WCHAR *path)
+{
+    RECT rc; BITMAPINFO info = {0}; BITMAPFILEHEADER header = {0};
+    HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap, old;
+    void *pixels; HANDLE file; DWORD written;
+    GetClientRect(hwnd, &rc);
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = rc.right; info.bmiHeader.biHeight = -rc.bottom;
+    info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    info.bmiHeader.biSizeImage = (DWORD)(rc.right * rc.bottom * 4);
+    bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, NULL, 0);
+    CHECK(bitmap != NULL);
+    if (!bitmap) { DeleteDC(memory); ReleaseDC(hwnd, dc); return; }
+    old = SelectObject(memory, bitmap);
+    CHECK(PrintWindow(hwnd, memory, PW_CLIENTONLY));
+    header.bfType = 0x4d42;
+    header.bfOffBits = sizeof(header) + sizeof(info.bmiHeader);
+    header.bfSize = header.bfOffBits + info.bmiHeader.biSizeImage;
+    file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(file != INVALID_HANDLE_VALUE);
+    if (file != INVALID_HANDLE_VALUE) {
+        WriteFile(file, &header, sizeof(header), &written, NULL);
+        WriteFile(file, &info.bmiHeader, sizeof(info.bmiHeader), &written, NULL);
+        WriteFile(file, pixels, info.bmiHeader.biSizeImage, &written, NULL);
+        CloseHandle(file);
+    }
+    SelectObject(memory, old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(hwnd, dc);
+}
+
+static DWORD ListPidAt(HWND list, int index)
+{
+    WCHAR buf[32] = {0};
+    ListView_GetItemText(list, index, 5, buf, ARRAYSIZE(buf));
+    return (DWORD)wcstoul(buf, NULL, 10);
+}
+
+static int ListFindPid(HWND list, DWORD pid)
+{
+    int i, count = ListView_GetItemCount(list);
+    for (i = 0; i < count; i++)
+        if (ListPidAt(list, i) == pid) return i;
+    return -1;
+}
+
+static void CheckBounds(HWND control, HWND page)
+{
+    RECT r, parent;
+    CHECK(control != NULL);
+    GetWindowRect(control, &r); MapWindowPoints(NULL, page, (POINT *)&r, 2);
+    GetClientRect(page, &parent);
+    CHECK(r.left >= 0 && r.top >= 0 && r.right <= parent.right && r.bottom <= parent.bottom);
+    CHECK(r.right > r.left && r.bottom > r.top);
+}
+
+int main(void)
+{
+    WNDCLASSEXW cls = {0};
+    INITCOMMONCONTROLSEX common = {sizeof(common), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES};
+    HWND hwnd, page, list, search;
+    ULONG64 sequence;
+    int before, i;
+    int originalColumn;
+    WCHAR query[64], summary[256];
+    g_hInst = GetModuleHandleW(NULL);
+    {
+        RECT work = {0, 0, 1920, 1040}, window = {-10, -10, 1760, 1280};
+        FitWindowRect(&window, &work);
+        CHECK(window.left >= work.left && window.top >= work.top);
+        CHECK(window.right <= work.right && window.bottom <= work.bottom);
+        window = (RECT){LONG_MIN, LONG_MIN, LONG_MAX, LONG_MAX};
+        FitWindowRect(&window, &work);
+        CHECK(EqualRect(&window, &work));
+    }
+    InitDpiApi(); InitCommonControlsEx(&common);
+    g_cfg.activeTab = TAB_PROCESSES; g_cfg.showAllUsers = TRUE;
+    g_cfg.updateSpeed = SPEED_NORMAL;
+    g_cfg.procTreeMode = TRUE;   /* mirrors the real registry default */
+    cls.cbSize = sizeof(cls); cls.lpfnWndProc = MainWndProc; cls.hInstance = g_hInst;
+    cls.lpszClassName = L"TaskmanWorkspaceTest"; cls.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    CHECK(RegisterClassExW(&cls) != 0);
+    hwnd = CreateWindowExW(0, cls.lpszClassName, L"Taskman test fixture", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        -16000, -16000, 1180, 900, NULL, NULL, g_hInst, NULL);
+    CHECK(hwnd != NULL);
+    if (!hwnd) return 1;
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE); LayoutMain(); Pump(1800);
+    page = TabProcesses()->hwnd; list = GetDlgItem(page, IDC_PROC_LIST); search = GetDlgItem(page, IDC_PROC_SEARCH);
+    originalColumn = ListView_GetColumnWidth(list, 0);
+    before = ListView_GetItemCount(list); CHECK(before > 0);
+    /* Tree mode is on by default, so the model must have been built. */
+    CHECK(g_cfg.procTreeMode);
+    SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_VIEW_PROCTREE, 0), 0);
+    Pump(200);
+    CHECK(!g_cfg.procTreeMode);                  /* toggled off */
+    SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_VIEW_PROCTREE, 0), 0);
+    Pump(200);
+    CHECK(g_cfg.procTreeMode);                   /* and back on */
+    {
+        /* Proc_SelectPid's reveal path: re-entry through ProcSnapshot,
+           recursion termination, and post-rebuild re-resolution of the
+           display row. Only this fixture has a real s_list, so only this
+           fixture can reach it -- the headless suite's s_list is NULL and
+           Proc_SelectPid early-returns immediately there. Everything below
+           is derived from the live process tree; the test skips itself
+           when the running machine happens not to have any parent/child
+           pair to work with, rather than asserting on a fabricated one. */
+        DWORD childPid = 0, parentPid = 0;
+        if (!ProcTest_FindChildWithParent(&childPid, &parentPid)) {
+            fprintf(stderr, "SKIP workspace: no process with a live parent found; "
+                             "cannot exercise Proc_SelectPid's reveal path\n");
+        } else {
+            int parentIndex = ListFindPid(list, parentPid);
+            CHECK(parentIndex >= 0);
+            if (parentIndex >= 0) {
+                CHECK(ProcTest_IsVisiblePid(childPid));   /* expanded to start */
+                ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+                ListView_SetItemState(list, parentIndex,
+                    LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                SendMessageW(list, WM_KEYDOWN, VK_LEFT, 0);   /* same path the UI uses */
+                Pump(100);
+                CHECK(!ProcTest_IsVisiblePid(childPid));      /* hidden under the collapsed parent */
+                CHECK(ListFindPid(list, childPid) < 0);
+
+                Proc_SelectPid(childPid);                     /* must return, not hang */
+                Pump(100);
+                CHECK(ProcTest_IsVisiblePid(childPid));
+                {
+                    int childIndex = ListFindPid(list, childPid);
+                    CHECK(childIndex >= 0);
+                    if (childIndex >= 0) {
+                        UINT state = (UINT)ListView_GetItemState(list, childIndex,
+                            LVIS_SELECTED | LVIS_FOCUSED);
+                        CHECK(state == (LVIS_SELECTED | LVIS_FOCUSED));
+                    }
+                }
+                CHECK(ProcTest_PendingPid() == 0);
+            }
+        }
+    }
+    /* Left and Right must not crash with a selection present. */
+    ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    SendMessageW(list, WM_KEYDOWN, VK_LEFT, 0); Pump(100);
+    SendMessageW(list, WM_KEYDOWN, VK_RIGHT, 0); Pump(100);
+    Capture(hwnd, L"tests/.build/workspace-tree.bmp");
+    /* The rest of this fixture predates tree mode and asserts flat-list
+       counts (e.g. exactly one row for a pid: search, with no ancestor
+       context rows). Turn tree mode back off through the same UI path so
+       those assertions still hold -- restoring what this block changed. */
+    SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_VIEW_PROCTREE, 0), 0);
+    Pump(200);
+    CHECK(!g_cfg.procTreeMode);
+    {
+        MSG key = {0};
+        HWND refresh = GetDlgItem(g_hDashboard, IDM_VIEW_REFRESH);
+        SetFocus(refresh);
+        key.hwnd = refresh; key.message = WM_KEYDOWN; key.wParam = VK_TAB;
+        CHECK(HandleWorkspaceKey(&key));
+        CHECK(GetFocus() == GetDlgItem(g_hDashboard, IDM_VIEW_TOGGLEPAUSE));
+        key.hwnd = GetFocus(); CHECK(HandleWorkspaceKey(&key));
+        CHECK(GetFocus() == GetDlgItem(g_hDashboard, IDM_FILE_NEWTASK));
+        key.hwnd = GetFocus(); CHECK(HandleWorkspaceKey(&key));
+        CHECK(GetFocus() != key.hwnd && IsChild(hwnd, GetFocus()));
+    }
+    CheckBounds(list, page); CheckBounds(GetDlgItem(page, IDC_PROC_DETAILS), page);
+    StringCchPrintfW(query, ARRAYSIZE(query), L"pid:%lu", (unsigned long)GetCurrentProcessId());
+    SetWindowTextW(search, query); CHECK(ListView_GetItemCount(list) == 1);
+    ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    CHECK(IsWindowEnabled(GetDlgItem(page, IDC_PROC_COPY)));
+    CHECK(!IsWindowEnabled(GetDlgItem(page, IDC_PROC_ENDPROCESS)));
+    SendMessageW(page, WM_COMMAND, IDC_PROC_CLEAR, 0);
+    /* Sampling stayed live during the tree checks, so processes may have
+       started/exited since 'before'. Clearing must restore the full view,
+       including this process, rather than retain the one-row PID filter. */
+    CHECK(GetWindowTextLengthW(search) == 0);
+    CHECK(ListView_GetItemCount(list) > 1);
+    CHECK(ListFindPid(list, GetCurrentProcessId()) >= 0);
+    App_ShowProcess(GetCurrentProcessId());
+    Pump(60);
+    Capture(hwnd, L"tests/.build/workspace-processes.bmp");
+    SetWindowTextW(search, L"no-such-process-987654321");
+    CHECK(ListView_GetItemCount(list) == 0);
+    CHECK(!IsWindowEnabled(GetDlgItem(page, IDC_PROC_COPY)));
+    GetWindowTextW(GetDlgItem(page, IDC_PROC_SUMMARY), summary, ARRAYSIZE(summary));
+    CHECK(wcsstr(summary, L"No matches") != NULL);
+    SendMessageW(hwnd, WM_COMMAND, IDM_PROC_FIND, 0); CHECK(GetFocus() == search);
+    SendMessageW(page, WM_COMMAND, IDC_PROC_CLEAR, 0);
+    SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_TOGGLEPAUSE, 0);
+    CHECK(g_cfg.updateSpeed == SPEED_PAUSED); Pump(120);
+    sequence = SysInfo_Lock()->sequence; SysInfo_Unlock(); Pump(1100);
+    CHECK(SysInfo_Lock()->sequence == sequence); SysInfo_Unlock();
+    SetWindowTextW(search, query); CHECK(ListView_GetItemCount(list) == 1);
+    SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_REFRESH, 0); Pump(250);
+    CHECK(SysInfo_Lock()->sequence > sequence); SysInfo_Unlock();
+    SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_TOGGLEPAUSE, 0); CHECK(g_cfg.updateSpeed == SPEED_NORMAL);
+    for (i = 0; i < TAB_COUNT; ++i) {
+        SwitchToTab(i, FALSE); Pump(120);
+        CHECK(IsWindowVisible(g_page[i]->hwnd));
+        CheckBounds(g_page[i]->hwnd, hwnd);
+    }
+    SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
+    Capture(hwnd, L"tests/.build/workspace-performance.bmp");
+    SwitchToTab(TAB_PROCESSES, FALSE);
+    SendMessageW(page, WM_COMMAND, IDC_PROC_CLEAR, 0);
+    SetWindowPos(hwnd, NULL, 0, 0, 1180, 720, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    LayoutMain(); Pump(30);
+    {
+        RECT tableRect, inspectorRect;
+        GetWindowRect(list, &tableRect);
+        GetWindowRect(GetDlgItem(page, IDC_PROC_DETAILS), &inspectorRect);
+        CHECK(inspectorRect.top >= tableRect.bottom); /* Short windows need the bottom inspector. */
+    }
+    App_ShowProcess(GetCurrentProcessId());
+    Capture(hwnd, L"tests/.build/workspace-short-wide.bmp");
+    SetWindowPos(hwnd, NULL, 0, 0, 840, 720, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    LayoutMain(); Pump(60);
+    CheckBounds(list, page); CheckBounds(GetDlgItem(page, IDC_PROC_DETAILS), page);
+    Capture(hwnd, L"tests/.build/workspace-compact.bmp");
+    ToggleTinyFootprint(); CHECK(!IsWindowVisible(g_hDashboard));
+    CheckBounds(list, page);
+    ToggleTinyFootprint(); CHECK(IsWindowVisible(g_hDashboard));
+    /* Exercise scaled fonts and layout without changing the user's desktop DPI. */
+    ShowWindow(hwnd, SW_HIDE); /* DPI fitting may move the fixture onto a real monitor. */
+    for (i = 144; i <= 192; i += 48) {
+        RECT target = {-16000, -16000, -16000 + MulDiv(1180, i, 96), -16000 + MulDiv(900, i, 96)};
+        SendMessageW(hwnd, WM_DPICHANGED, MAKELONG(i, i), (LPARAM)&target);
+        {
+            RECT work = {0}, actual;
+            MINMAXINFO limits = {0};
+            CHECK(WindowWorkArea(hwnd, NULL, &work)); GetWindowRect(hwnd, &actual);
+            SendMessageW(hwnd, WM_GETMINMAXINFO, 0, (LPARAM)&limits);
+            CHECK(limits.ptMinTrackSize.x <= work.right - work.left);
+            CHECK(limits.ptMinTrackSize.y <= work.bottom - work.top);
+            CHECK(actual.left >= work.left && actual.top >= work.top && actual.right <= work.right && actual.bottom <= work.bottom);
+        }
+        CheckBounds(list, page); CheckBounds(GetDlgItem(page, IDC_PROC_DETAILS), page);
+        CHECK(abs(ListView_GetColumnWidth(list, 0) - MulDiv(originalColumn, i, 96)) <= 2);
+        Pump(50);
+    }
+    Capture(hwnd, L"tests/.build/workspace-200dpi.bmp");
+    /* Compact fallback also fits a 1080p work area at 200% scaling. */
+    TabProcesses()->OnLayout(TabProcesses(), DPX(800), DPX(260), FALSE);
+    {
+        RECT actual;
+        GetWindowRect(list, &actual); MapWindowPoints(NULL, page, (POINT *)&actual, 2);
+        CHECK(actual.top >= 0 && actual.bottom <= DPX(260));
+        CHECK(!(GetWindowLongW(GetDlgItem(page, IDC_PROC_DETAILS), GWL_STYLE) & WS_VISIBLE));
+    }
+    DestroyWindow(hwnd); Pump(10);
+    printf("workspace: %d failures; search, selection, pause, refresh, six tabs, resize, tiny mode and DPI\n", failures);
+    return failures ? 1 : 0;
+}

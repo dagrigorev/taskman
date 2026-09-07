@@ -1,0 +1,16 @@
+# build output
+build/
+tests/.build/
+CMakeUserPresets.json
+cmake-build-*/
+
+# stray intermediates from in-tree builds
+*.o
+*.obj
+*.res
+*.ilk
+*.pdb
+*.exe
+
+# SDD workspace (plan execution scratch)
+.superpowers/
