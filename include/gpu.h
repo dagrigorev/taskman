@@ -55,4 +55,49 @@ void Gpu_FormatLuid(ULONGLONG luid, WCHAR *buf, size_t cch);
    the adapter: luid_0x<high>_0x<low>_phys_<n>. No pid, no engine fields. */
 BOOL Gpu_ParseMemoryInstance(const WCHAR *name, ULONGLONG *luid, unsigned *phys);
 
+#define GPU_MAX_ENGINES   256   /* 3 adapters x 11 engine types, with room  */
+#define GPU_MAX_PROCESSES 512
+
+typedef struct {
+    ULONGLONG luid;
+    double    utilization;                  /* max across this adapter's engines */
+    double    engine[GPU_ENGINE_KINDS];     /* max across engines of that kind   */
+    ULONGLONG dedicatedUsed;                /* from \GPU Adapter Memory          */
+} GpuAdapterSample;
+
+typedef struct {
+    DWORD  pid;
+    double utilization;                     /* summed, clamped to 100            */
+} GpuProcessSample;
+
+/* Caller-allocated. Roughly 14 KB, so callers place it in static or heap
+   storage rather than on a thread stack. */
+typedef struct {
+    struct {
+        ULONGLONG     luid;
+        unsigned      phys, engine;
+        GpuEngineKind kind;
+        double        sum;
+    } engines[GPU_MAX_ENGINES];
+    int engineCount;
+    struct { DWORD pid; double sum; } processes[GPU_MAX_PROCESSES];
+    int processCount;
+    /* Dedicated video memory in use, keyed by adapter. Separate from the
+       engine buckets because its counter carries no pid and no engine. */
+    struct { ULONGLONG luid; ULONGLONG dedicatedUsed; } memory[GPU_MAX_ADAPTERS];
+    int memoryCount;
+} GpuAccumulator;
+
+void Gpu_AccumReset(GpuAccumulator *acc);
+/* Adds one instance's value. Returns FALSE only when a bucket table is full,
+   in which case that instance is dropped rather than misattributed. */
+BOOL Gpu_AccumAdd(GpuAccumulator *acc, const GpuInstance *inst, double value);
+/* Engine sums folded to one entry per adapter. Returns adapters written. */
+int Gpu_AccumAdapters(const GpuAccumulator *acc, GpuAdapterSample *out, int max);
+/* One entry per pid, summed across engines and adapters, clamped to 100. */
+int Gpu_AccumProcesses(const GpuAccumulator *acc, GpuProcessSample *out, int max);
+/* Records one adapter's dedicated video memory in use. Adapters with a
+   memory reading but no active engine still appear in Gpu_AccumAdapters. */
+BOOL Gpu_AccumMemory(GpuAccumulator *acc, ULONGLONG luid, ULONGLONG dedicatedUsed);
+
 #endif /* CTM_GPU_H */

@@ -133,6 +133,163 @@ static void TestFormatLuid(void)
     }
 }
 
+/* Sum across processes on one engine; max across engines for the adapter.
+   The fixture is built so sum and max DIFFER: engine 0 totals 30 (10+20)
+   and engine 1 totals 25, so the adapter is 30, never 55. A max/sum swap
+   fails here rather than silently shipping >100% readings. */
+static void TestAggregateSumThenMax(void)
+{
+    GpuAccumulator acc;
+    GpuAdapterSample adapters[GPU_MAX_ADAPTERS];
+    GpuInstance g;
+    int n;
+
+    Gpu_AccumReset(&acc);
+
+    g.pid = 100; g.luid = 0xAAA; g.phys = 0; g.engine = 0; g.kind = GPU_ENGINE_3D;
+    CHECK(Gpu_AccumAdd(&acc, &g, 10.0));
+    g.pid = 200;
+    CHECK(Gpu_AccumAdd(&acc, &g, 20.0));           /* same engine, other pid */
+    g.pid = 100; g.engine = 1; g.kind = GPU_ENGINE_COPY;
+    CHECK(Gpu_AccumAdd(&acc, &g, 25.0));
+
+    n = Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS);
+    CHECK(n == 1);
+    CHECK(adapters[0].luid == 0xAAA);
+    CHECK(adapters[0].utilization > 29.9 && adapters[0].utilization < 30.1);
+    CHECK(adapters[0].engine[GPU_ENGINE_3D]   > 29.9);
+    CHECK(adapters[0].engine[GPU_ENGINE_COPY] > 24.9 &&
+          adapters[0].engine[GPU_ENGINE_COPY] < 25.1);
+}
+
+/* phys distinguishes engines on the same adapter, so two engines that share
+   an index but differ in phys must not be merged. */
+static void TestAggregateSeparatesByPhys(void)
+{
+    GpuAccumulator acc;
+    GpuAdapterSample adapters[GPU_MAX_ADAPTERS];
+    GpuInstance g;
+
+    Gpu_AccumReset(&acc);
+    g.pid = 1; g.luid = 0xBBB; g.phys = 0; g.engine = 0; g.kind = GPU_ENGINE_3D;
+    CHECK(Gpu_AccumAdd(&acc, &g, 40.0));
+    g.phys = 1;
+    CHECK(Gpu_AccumAdd(&acc, &g, 10.0));
+
+    CHECK(Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS) == 1);
+    CHECK(adapters[0].utilization > 39.9 && adapters[0].utilization < 40.1);
+}
+
+/* Three adapters were observed on the development machine. */
+static void TestAggregateMultipleAdapters(void)
+{
+    GpuAccumulator acc;
+    GpuAdapterSample adapters[GPU_MAX_ADAPTERS];
+    GpuInstance g;
+    int n, i;
+    double total = 0;
+
+    Gpu_AccumReset(&acc);
+    g.pid = 1; g.phys = 0; g.engine = 0; g.kind = GPU_ENGINE_3D;
+    g.luid = 0x12cae; CHECK(Gpu_AccumAdd(&acc, &g, 5.0));
+    g.luid = 0x14b13; CHECK(Gpu_AccumAdd(&acc, &g, 7.0));
+    g.luid = 0x14b7d; CHECK(Gpu_AccumAdd(&acc, &g, 9.0));
+
+    n = Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS);
+    CHECK(n == 3);
+    for (i = 0; i < n; ++i) total += adapters[i].utilization;
+    CHECK(total > 20.9 && total < 21.1);
+}
+
+/* Per-process sums across every engine AND every adapter, clamped at 100. */
+static void TestAggregateProcesses(void)
+{
+    GpuAccumulator acc;
+    GpuProcessSample procs[8];
+    GpuInstance g;
+    int n, i;
+    double got = -1;
+
+    Gpu_AccumReset(&acc);
+    g.pid = 42; g.luid = 0xAAA; g.phys = 0; g.engine = 0; g.kind = GPU_ENGINE_3D;
+    CHECK(Gpu_AccumAdd(&acc, &g, 30.0));
+    g.engine = 1; g.kind = GPU_ENGINE_COPY;
+    CHECK(Gpu_AccumAdd(&acc, &g, 20.0));
+    g.luid = 0xBBB;                                  /* a second adapter */
+    CHECK(Gpu_AccumAdd(&acc, &g, 15.0));
+
+    n = Gpu_AccumProcesses(&acc, procs, 8);
+    CHECK(n == 1);
+    for (i = 0; i < n; ++i) if (procs[i].pid == 42) got = procs[i].utilization;
+    CHECK(got > 64.9 && got < 65.1);                 /* 30 + 20 + 15 */
+}
+
+static void TestAggregateClampsProcess(void)
+{
+    GpuAccumulator acc;
+    GpuProcessSample procs[8];
+    GpuInstance g;
+
+    Gpu_AccumReset(&acc);
+    g.pid = 7; g.luid = 0xAAA; g.phys = 0; g.kind = GPU_ENGINE_3D;
+    g.engine = 0; CHECK(Gpu_AccumAdd(&acc, &g, 80.0));
+    g.engine = 1; CHECK(Gpu_AccumAdd(&acc, &g, 80.0));
+
+    CHECK(Gpu_AccumProcesses(&acc, procs, 8) == 1);
+    CHECK(procs[0].utilization > 99.9 && procs[0].utilization < 100.1);
+}
+
+/* An idle adapter still holds video memory, so a memory reading alone must
+   produce an adapter entry -- otherwise an idle GPU vanishes from the list. */
+static void TestAggregateMemoryOnlyAdapter(void)
+{
+    GpuAccumulator acc;
+    GpuAdapterSample adapters[GPU_MAX_ADAPTERS];
+
+    Gpu_AccumReset(&acc);
+    CHECK(Gpu_AccumMemory(&acc, 0xCCC, 2809819136ULL));
+
+    CHECK(Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS) == 1);
+    CHECK(adapters[0].luid == 0xCCC);
+    CHECK(adapters[0].dedicatedUsed == 2809819136ULL);
+    CHECK(adapters[0].utilization == 0.0);
+}
+
+/* The counter reports per phys node; take the largest, never the sum. */
+static void TestAggregateMemoryTakesMaxNode(void)
+{
+    GpuAccumulator acc;
+    GpuAdapterSample adapters[GPU_MAX_ADAPTERS];
+
+    Gpu_AccumReset(&acc);
+    CHECK(Gpu_AccumMemory(&acc, 0xDDD, 1000));
+    CHECK(Gpu_AccumMemory(&acc, 0xDDD, 4000));
+    CHECK(Gpu_AccumMemory(&acc, 0xDDD, 2000));
+
+    CHECK(Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS) == 1);
+    CHECK(adapters[0].dedicatedUsed == 4000);
+}
+
+/* Reset must actually clear, or a second sample accumulates onto the first
+   and every reading climbs forever. */
+static void TestAggregateResetClears(void)
+{
+    GpuAccumulator acc;
+    GpuAdapterSample adapters[GPU_MAX_ADAPTERS];
+    GpuInstance g;
+
+    Gpu_AccumReset(&acc);
+    g.pid = 1; g.luid = 0xAAA; g.phys = 0; g.engine = 0; g.kind = GPU_ENGINE_3D;
+    Gpu_AccumAdd(&acc, &g, 50.0);
+    Gpu_AccumMemory(&acc, 0xAAA, 999);
+    Gpu_AccumReset(&acc);
+    CHECK(Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS) == 0);
+
+    Gpu_AccumAdd(&acc, &g, 10.0);
+    CHECK(Gpu_AccumAdapters(&acc, adapters, GPU_MAX_ADAPTERS) == 1);
+    CHECK(adapters[0].utilization > 9.9 && adapters[0].utilization < 10.1);
+}
+
 int main(void)
 {
     CHECK(GPU_ENGINE_KINDS == 7);
@@ -144,6 +301,14 @@ int main(void)
     TestClassifyEngine();
     TestParseMemoryInstance();
     TestFormatLuid();
+    TestAggregateSumThenMax();
+    TestAggregateSeparatesByPhys();
+    TestAggregateMultipleAdapters();
+    TestAggregateProcesses();
+    TestAggregateClampsProcess();
+    TestAggregateMemoryOnlyAdapter();
+    TestAggregateMemoryTakesMaxNode();
+    TestAggregateResetClears();
     printf("gpu: %d failures\n", failures);
     return failures ? 1 : 0;
 }
