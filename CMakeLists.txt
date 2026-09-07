@@ -32,7 +32,10 @@ target_compile_definitions(taskman_platform INTERFACE
     UNICODE _UNICODE $<$<CONFIG:Debug>:_DEBUG>)
 target_link_libraries(taskman_platform INTERFACE
     comctl32 comdlg32 ole32 shlwapi shell32 psapi uxtheme dwmapi
-    iphlpapi wtsapi32 version advapi32 gdi32 user32 kernel32 pdh dxgi)
+    iphlpapi wtsapi32 version advapi32 gdi32 user32 kernel32 pdh dxgi
+    # dxguid supplies IID_IDXGIFactory1. MinGW's libdxgi.a already carries
+    # the interface GUIDs; the MSVC import library does not.
+    dxguid)
 if(MSVC)
     target_include_directories(taskman_platform INTERFACE
         "$<$<COMPILE_LANGUAGE:RC>:${PROJECT_SOURCE_DIR}/res>")

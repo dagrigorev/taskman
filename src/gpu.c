@@ -10,6 +10,8 @@
 #include <pdh.h>
 /* PDH_MORE_DATA and the PDH_CSTATUS_* values live here, not in pdh.h. */
 #include <pdhmsg.h>
+#define COBJMACROS
+#include <dxgi.h>
 
 /* Returns the text just past `marker`, or NULL when it does not occur.
    Note "_eng_" cannot match inside "_engtype_", which reads "_engt". */
@@ -341,4 +343,48 @@ BOOL Gpu_QuerySample(GpuAccumulator *acc, ULONGLONG nowTick)
         }
     }
     return TRUE;
+}
+
+/* dxgi.dll is resolved at runtime so the executable keeps its property of
+   having no load-time dependency on anything but core Windows DLLs. */
+typedef HRESULT (WINAPI *PFN_CreateDXGIFactory1)(REFIID riid, void **factory);
+
+int Gpu_DescribeAdapters(GpuAdapterInfo *out, int max)
+{
+    PFN_CreateDXGIFactory1 create;
+    HMODULE library;
+    IDXGIFactory1 *factory = NULL;
+    int count = 0;
+    UINT index;
+
+    if (!out || max <= 0) return 0;
+    library = LoadLibraryW(L"dxgi.dll");
+    if (!library) return 0;
+    create = (PFN_CreateDXGIFactory1)(void *)GetProcAddress(library, "CreateDXGIFactory1");
+    if (!create || FAILED(create(&IID_IDXGIFactory1, (void **)&factory)) || !factory) {
+        FreeLibrary(library);
+        return 0;
+    }
+
+    for (index = 0; count < max; ++index) {
+        IDXGIAdapter1 *adapter = NULL;
+        DXGI_ADAPTER_DESC1 desc;
+        if (IDXGIFactory1_EnumAdapters1(factory, index, &adapter) != S_OK || !adapter) break;
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(adapter, &desc))) {
+            ZeroMemory(&out[count], sizeof(out[count]));
+            /* PDH's LUID text is high half then low half; match that order. */
+            out[count].luid = ((ULONGLONG)(ULONG)desc.AdapterLuid.HighPart << 32) |
+                              (ULONGLONG)desc.AdapterLuid.LowPart;
+            lstrcpynW(out[count].name, desc.Description, GPU_NAME_MAX);
+            out[count].dedicatedTotal = (ULONGLONG)desc.DedicatedVideoMemory;
+            out[count].sharedTotal    = (ULONGLONG)desc.SharedSystemMemory;
+            ++count;
+        }
+        IDXGIAdapter1_Release(adapter);
+    }
+
+    IDXGIFactory1_Release(factory);
+    /* dxgi.dll stays loaded: releasing the factory and unloading in the same
+       breath has historically been unstable, and the module is tiny. */
+    return count;
 }

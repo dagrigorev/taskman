@@ -47,6 +47,25 @@ int main(void)
         }
     }
 
+    {
+        /* DXGI is optional: absence must degrade to LUID-named adapters,
+           never drop them. When present, every adapter must be named. */
+        GpuAdapterInfo info[GPU_MAX_ADAPTERS];
+        int describes = Gpu_DescribeAdapters(info, GPU_MAX_ADAPTERS);
+        CHECK(describes >= 0);
+        if (describes > 0) {
+            int i;
+            for (i = 0; i < describes; ++i) {
+                CHECK(info[i].name[0] != L'\0');
+                CHECK(info[i].luid != 0);
+            }
+            printf("gpu_live: DXGI described %d adapters, first = %ls\n",
+                   describes, info[0].name);
+        } else {
+            printf("gpu_live: DXGI unavailable; adapters will be LUID-named\n");
+        }
+    }
+
     Gpu_QueryClose();
     printf("gpu_live: %d failures (%d engines, %d adapters)\n",
            failures, acc.engineCount, n);

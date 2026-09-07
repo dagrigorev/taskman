@@ -113,4 +113,16 @@ void Gpu_QueryClose(void);
    wildcard counters are rebuilt. */
 BOOL Gpu_QuerySample(GpuAccumulator *acc, ULONGLONG nowTick);
 
+typedef struct {
+    ULONGLONG luid;
+    WCHAR     name[GPU_NAME_MAX];
+    ULONGLONG dedicatedTotal;
+    ULONGLONG sharedTotal;
+} GpuAdapterInfo;
+
+/* Enumerates adapters through DXGI for their names and memory sizes.
+   Returns 0 when DXGI is unavailable, which is not an error: callers fall
+   back to naming adapters by LUID rather than hiding them. */
+int Gpu_DescribeAdapters(GpuAdapterInfo *out, int max);
+
 #endif /* CTM_GPU_H */
