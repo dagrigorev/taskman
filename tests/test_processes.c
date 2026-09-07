@@ -317,6 +317,16 @@ int main(void)
     Proc_SelectPid(222);
     CHECK(!s_query[0] && g_viewCnt==2); /* Own processes plus the requested cross-user target. */
     CHECK(g_view[ListView_GetNextItem(s_list,-1,LVNI_SELECTED)].pid==222);
+    /* A request for a process that no longer exists must be dropped after one
+       snapshot. The pending PID is exempt from the user filter, so left set it
+       would keep trying to reveal a dead process on every future tick. */
+    Proc_SelectPid(999);
+    CHECK(s_pendingPid==999);   /* held: it may only be filtered out so far */
+    ProcSnapshot(NULL);
+    CHECK(s_pendingPid==0);     /* the snapshot proved it is really gone */
+    /* 222 is still here, but now only because it is the SELECTED row, which
+       the user filter also exempts -- not because of any pending request. */
+    CHECK(g_viewCnt==2);
     DestroyWindow(s_list);s_list=NULL;DestroyWindow(parent);
     Proc_Reset();
     printf("processes: %d failures\n",failures);

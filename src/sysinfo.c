@@ -393,6 +393,14 @@ BOOL SysInfo_Start(HWND notify)
     return TRUE;
 }
 
+BOOL SysInfo_Stopping(void)
+{
+    /* Read once: SysInfo_Stop only closes the handle after joining the
+       worker, so a collector still running cannot observe a stale one. */
+    HANDLE quit = g_evtQuit;
+    return quit && WaitForSingleObject(quit, 0) == WAIT_OBJECT_0;
+}
+
 void SysInfo_Stop(void)
 {
     if (g_evtQuit) SetEvent(g_evtQuit);

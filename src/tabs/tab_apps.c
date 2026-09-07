@@ -67,6 +67,11 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
 
     if (!ctx->start) ctx->start = GetTickCount64();
     if (ctx->cnt >= APP_ROW_LIMIT || GetTickCount64() - ctx->start >= 1000) return FALSE;
+    /* This enumeration can run for up to a second, and SysInfo_Stop joins
+       the worker with an INFINITE wait -- so without this the whole budget
+       is added to the application's shutdown time. Discard the partial
+       result: nobody is going to display it. */
+    if (SysInfo_Stopping()) { ctx->failed = TRUE; return FALSE; }
     if (!IsWindowVisible(hwnd)) return TRUE;
 
     style   = GetWindowLongW(hwnd, GWL_STYLE);
@@ -104,6 +109,10 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
     row->tid = tid;
     lstrcpynW(row->title, title, APP_TITLE_MAX);
     row->hung = IsHungAppWindow(hwnd);
+    /* Our own windows are probed too, deliberately. This runs on the
+       collector thread, so a hung UI thread of ours is exactly as
+       detectable -- and as worth reporting -- as any other application's.
+       Only the caption read above avoids messaging our own thread. */
     if (!row->hung && GetTickCount64() - ctx->start < APP_PROBE_BUDGET_MS) {
         SetLastError(ERROR_SUCCESS);
         if (!SendMessageTimeoutW(hwnd, WM_NULL, 0, 0,

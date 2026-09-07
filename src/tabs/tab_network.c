@@ -151,9 +151,15 @@ static LRESULT CALLBACK NetGraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         StringCchPrintfW(title, ARRAYSIZE(title), L"%s - %s utilization (0-100%%)",
             row ? row->name : L"No adapter selected", mode == 1 ? L"Sent" : mode == 2 ? L"Received" : L"Total");
         SetTextColor(dc, UI_INK); SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, g_hFont);
         graph = rc; graph.left += DPX(14); graph.right -= DPX(14); graph.top += DPX(10);
-        DrawTextW(dc, title, -1, &graph, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        {
+            /* Restore the previous font once the caption is drawn: g_hFont is
+               deleted and recreated on a DPI or font change, and leaving a
+               deleted object selected into a DC is undefined. */
+            HGDIOBJ oldFont = SelectObject(dc, g_hFont);
+            DrawTextW(dc, title, -1, &graph, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            if (oldFont) SelectObject(dc, oldFont);
+        }
         graph.top += DPX(28); graph.bottom -= DPX(10);
         grid = CreatePen(PS_SOLID, 1, UI_LINE);
         old = SelectObject(dc, grid);

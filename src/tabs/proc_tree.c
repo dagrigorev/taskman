@@ -62,12 +62,38 @@ void ProcTree_Link(const ProcRow *rows, ProcTreeInfo *tree, int count,
         tree[i].parent = parent;
     }
 
-    /* Break any cycle: walking up from a node must reach a root within
-       PROC_DEPTH_MAX steps, otherwise that node is promoted to root. */
-    for (i = 0; i < count; ++i) {
-        int walk = tree[i].parent, steps = 0;
-        while (walk >= 0 && steps < PROC_DEPTH_MAX) { walk = tree[walk].parent; ++steps; }
-        if (steps >= PROC_DEPTH_MAX) tree[i].parent = -1;
+    /* Break cycles at the node that closes them, rather than at whichever
+       node the walk happened to start from. Given X -> A with A <-> B, the
+       cycle is A <-> B: A must be orphaned and X must keep its parent. A
+       bounded step count cannot tell those two cases apart and detaches X
+       as well. States: 0 unvisited, 1 on the current chain, 2 settled. */
+    {
+        unsigned char *state = (unsigned char *)calloc((size_t)count, 1);
+        if (state) {
+            for (i = 0; i < count; ++i) {
+                int walk = i;
+                while (walk >= 0 && state[walk] == 0) {
+                    state[walk] = 1;
+                    walk = tree[walk].parent;
+                }
+                /* Landing on a node still marked as on this chain means the
+                   chain closed on itself; that node is inside the cycle. */
+                if (walk >= 0 && state[walk] == 1) tree[walk].parent = -1;
+                for (walk = i; walk >= 0 && state[walk] == 1; walk = tree[walk].parent)
+                    state[walk] = 2;
+            }
+            free(state);
+        } else {
+            /* No memory for the exact pass. The bounded walk is less precise
+               (it can orphan a node merely hanging off a cycle) but still
+               leaves the parent chains acyclic, which is what the rest of
+               this file depends on. */
+            for (i = 0; i < count; ++i) {
+                int walk = tree[i].parent, steps = 0;
+                while (walk >= 0 && steps < PROC_DEPTH_MAX) { walk = tree[walk].parent; ++steps; }
+                if (steps >= PROC_DEPTH_MAX) tree[i].parent = -1;
+            }
+        }
     }
 
     /* Link children in ascending index order, and count them. */
@@ -79,10 +105,15 @@ void ProcTree_Link(const ProcRow *rows, ProcTreeInfo *tree, int count,
         tree[parent].childCount++;
     }
 
-    /* Depth follows from the now-acyclic parent chain. */
+    /* Depth follows from the now-acyclic parent chain, which cannot be
+       longer than count - 1 hops. Bounding by count instead of by
+       PROC_DEPTH_MAX matters for correctness, not just for deep trees: a
+       saturated depth would make ProcTree_Aggregate fold two levels of the
+       same chain in one pass, in index order, silently losing a subtree's
+       contribution to its parent. */
     for (i = 0; i < count; ++i) {
         int walk = tree[i].parent, depth = 0;
-        while (walk >= 0 && depth < PROC_DEPTH_MAX) { walk = tree[walk].parent; ++depth; }
+        while (walk >= 0 && depth < count) { walk = tree[walk].parent; ++depth; }
         tree[i].depth = depth;
     }
 
@@ -100,28 +131,29 @@ void ProcTree_Link(const ProcRow *rows, ProcTreeInfo *tree, int count,
 
 void ProcTree_Aggregate(const ProcRow *rows, ProcTreeInfo *tree, int count)
 {
-    int i;
+    int i, depth, maxDepth = 0;
 
-    /* Seed every node with its own values. */
+    /* Seed every node with its own values, and learn how deep to fold. */
     for (i = 0; i < count; ++i) {
         tree[i].cpuRollup      = rows[i].cpuPct;
         tree[i].memRollup      = rows[i].memoryKnown ? rows[i].privateBytes : 0;
         tree[i].memRollupKnown = rows[i].memoryKnown;
+        if (tree[i].depth > maxDepth) maxDepth = tree[i].depth;
     }
 
-    /* Fold each node into its parent, deepest first. Sorting indices by
-       descending depth gives a valid post-order without recursion, so a
-       pathological chain cannot blow the stack. */
-    {
-        int depth;
-        for (depth = PROC_DEPTH_MAX; depth > 0; --depth) {
-            for (i = 0; i < count; ++i) {
-                int parent = tree[i].parent;
-                if (tree[i].depth != depth || parent < 0) continue;
-                tree[parent].cpuRollup += tree[i].cpuRollup;
-                tree[parent].memRollup += tree[i].memRollup;
-                if (tree[i].memRollupKnown) tree[parent].memRollupKnown = TRUE;
-            }
+    /* Fold each node into its parent, deepest level first. Visiting whole
+       depth levels in descending order is a valid post-order without
+       recursion, so a pathological chain cannot blow the stack.
+       Folding from the depth actually observed rather than from a fixed
+       ceiling keeps this at O(maxDepth * count) -- three or four passes on
+       a real machine -- instead of PROC_DEPTH_MAX passes every sample. */
+    for (depth = maxDepth; depth > 0; --depth) {
+        for (i = 0; i < count; ++i) {
+            int parent = tree[i].parent;
+            if (tree[i].depth != depth || parent < 0) continue;
+            tree[parent].cpuRollup += tree[i].cpuRollup;
+            tree[parent].memRollup += tree[i].memRollup;
+            if (tree[i].memRollupKnown) tree[parent].memRollupKnown = TRUE;
         }
     }
 }
@@ -132,8 +164,11 @@ int ProcTree_ApplyContext(ProcRow *rows, ProcTreeInfo *tree, int count,
     BOOL *keep;
     int i, kept = 0;
 
-    if (firstRoot) *firstRoot = -1;
-    if (count <= 0) return 0;
+    if (count <= 0) { if (firstRoot) *firstRoot = -1; return 0; }
+    /* No match array means no search is active: every row stays, nothing is
+       context, and the links ProcTree_Link already built remain correct --
+       so leave *firstRoot alone rather than clearing a valid root chain. */
+    if (!matches) return count;
     keep = (BOOL *)calloc((size_t)count, sizeof(BOOL));
     if (!keep) return count;          /* keep everything rather than lie */
 

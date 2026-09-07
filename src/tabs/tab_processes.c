@@ -652,6 +652,11 @@ void Proc_SelectPid(DWORD pid)
             return;
         }
     }
+    /* Deliberately leaves s_pendingPid set. A cross-tab target that belongs
+       to another user is not in g_view yet -- it is the pending PID that
+       exempts it from the user filter on the NEXT snapshot, which is what
+       makes it appear at all. ProcSnapshot drops the request if that
+       snapshot still cannot find it. */
 }
 
 /* Test-only introspection (see app.h): finds the first row in g_view/g_tree
@@ -1039,7 +1044,18 @@ static void ProcSnapshot(TabPage *p)
         InvalidateRect(s_list, NULL, FALSE);
     }
 
-    if (s_pendingPid) Proc_SelectPid(s_pendingPid);
+    if (s_pendingPid) {
+        /* The user-filter pass above already exempted this PID, so if it is
+           still absent the process is genuinely gone -- drop the request.
+           Left set, it would exempt a dead PID from the user filter on every
+           future tick for the rest of the session. */
+        int pending;
+        BOOL present = FALSE;
+        for (pending = 0; pending < g_viewCnt; ++pending)
+            if (g_view[pending].pid == s_pendingPid) { present = TRUE; break; }
+        if (present) Proc_SelectPid(s_pendingPid);
+        else         s_pendingPid = 0;
+    }
     if (s_allUsers && App_IsElevated())
         SetWindowTextW(s_allUsers, g_cfg.showAllUsers ? L"Show only &my processes" : L"Show processes from &all users");
     /* restore selection */

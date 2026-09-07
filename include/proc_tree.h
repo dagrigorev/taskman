@@ -68,7 +68,10 @@ void ProcTree_Aggregate(const ProcRow *rows, ProcTreeInfo *tree, int count);
 /* Keeps matches and their ancestors, drops the rest, and marks ancestors
    that are not themselves matches as context. Compacts rows and tree in
    place, re-links over the survivors, and returns the new count.
-   `matches` is parallel to `rows`. Requires ProcTree_Link to have run. */
+   `matches` is parallel to `rows`; passing NULL means no search is active,
+   in which case every row is kept, nothing is marked context, and the
+   existing links and *firstRoot are left untouched.
+   Requires ProcTree_Link to have run. */
 int ProcTree_ApplyContext(ProcRow *rows, ProcTreeInfo *tree, int count,
                           const BOOL *matches, int *firstRoot);
 

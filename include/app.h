@@ -118,6 +118,9 @@ typedef struct {
 
 BOOL  SysInfo_Start(HWND notify);
 void  SysInfo_Stop(void);
+/* TRUE once shutdown has been requested. Long-running per-tab collectors
+   poll this so SysInfo_Stop's join does not wait out their whole budget. */
+BOOL  SysInfo_Stopping(void);
 void  SysInfo_SetSpeed(int speed);          /* SPEED_*                       */
 void  SysInfo_RefreshNow(void);
 void  SysInfo_SetActiveTab(int tab);

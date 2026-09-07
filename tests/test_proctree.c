@@ -90,6 +90,26 @@ static void TestLinkCycleTerminates(void)
     CHECK(tree[0].parent == -1 || tree[1].parent == -1);
 }
 
+/* The cycle must be broken INSIDE itself, not at whatever node the walk
+   started from. X hangs off the cycle A <-> B: X is innocent and must keep
+   its parent, while one of A/B is orphaned to break the loop. A bounded
+   step count cannot tell those apart and detaches X too. */
+static void TestLinkBreaksCycleNotBystander(void)
+{
+    ProcRow rows[3];
+    ProcTreeInfo tree[3];
+    int root = -1;
+
+    rows[0] = MakeRow(10, 20, 500, 0, 0, TRUE);   /* A, parented to B */
+    rows[1] = MakeRow(20, 10, 500, 0, 0, TRUE);   /* B, parented to A */
+    rows[2] = MakeRow(30, 10, 600, 0, 0, TRUE);   /* X, hangs off A    */
+    ProcTree_Link(rows, tree, 3, &root);          /* must return, not hang */
+
+    CHECK(tree[2].parent == 0);                   /* X keeps its parent A */
+    CHECK(tree[0].parent == -1 || tree[1].parent == -1);  /* loop severed */
+    CHECK(tree[2].depth == tree[0].depth + 1);    /* and stays beneath A  */
+}
+
 static void TestAggregate(void)
 {
     ProcRow rows[3];
@@ -297,6 +317,7 @@ int main(void)
     TestLinkRejectsPidReuse();
     TestLinkMissingParent();
     TestLinkCycleTerminates();
+    TestLinkBreaksCycleNotBystander();
     TestAggregate();
     TestAggregateAllUnknown();
     TestContextRows();

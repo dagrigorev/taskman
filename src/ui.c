@@ -458,11 +458,17 @@ BOOL UI_ControlNotify(NMHDR *nm, LRESULT *result)
             UI_Fill(draw->hdc, &rc, GetDlgCtrlID(GetParent(nm->hwndFrom)) == IDC_DASHBOARD ? UI_NAVY : UI_BG);
             UI_Card(draw->hdc, &rc, fill, primary ? fill : UI_LINE);
             GetWindowTextW(nm->hwndFrom, text, ARRAYSIZE(text));
-            /* Use the native font and mnemonic processing for buttons. */
+            /* Use the native font and mnemonic processing for buttons.
+               Restore the previous font before returning: g_hFont is
+               deleted and recreated on a DPI or font change, and leaving a
+               deleted object selected into a DC is undefined. */
             SetBkMode(draw->hdc, TRANSPARENT); SetTextColor(draw->hdc, ink);
-            SelectObject(draw->hdc, g_hFont);
-            DrawTextW(draw->hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            if (draw->uItemState & CDIS_FOCUS) { InflateRect(&rc, -DPX(3), -DPX(3)); DrawFocusRect(draw->hdc, &rc); }
+            {
+                HGDIOBJ oldFont = SelectObject(draw->hdc, g_hFont);
+                DrawTextW(draw->hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                if (draw->uItemState & CDIS_FOCUS) { InflateRect(&rc, -DPX(3), -DPX(3)); DrawFocusRect(draw->hdc, &rc); }
+                if (oldFont) SelectObject(draw->hdc, oldFont);
+            }
             *result = CDRF_SKIPDEFAULT; return TRUE;
         }
     }

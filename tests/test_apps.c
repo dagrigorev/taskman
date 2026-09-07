@@ -16,6 +16,9 @@ void UI_SetHeaderSortArrow(HWND h,int c,int d) { (void)h;(void)c;(void)d; }
 BOOL App_RunTaskDialog(HWND h) { (void)h;return TRUE; }
 void App_MinimizeOnUse(void) {}
 void App_ReportError(HWND h,const WCHAR *op,DWORD e) { (void)h;(void)op;(void)e; }
+/* Drives the shutdown-abort path in EnumTopLevel without a real collector. */
+static BOOL simulateStopping;
+BOOL SysInfo_Stopping(void) { return simulateStopping; }
 static HWND actionTarget;
 static int actionCount, confirmAnswer = IDNO;
 static BOOL simulateTimeout;
@@ -64,6 +67,19 @@ int main(void)
     EnumTopLevel(top,(LPARAM)&ctx);
     CHECK(ctx.cnt == 1);
     CHECK(app_valid(&ctx.buf[0]));
+    {
+        /* Shutdown must abort the enumeration rather than let SysInfo_Stop's
+           join wait out the remaining budget, and the partial result must be
+           marked failed so Apps_Collect discards it instead of publishing a
+           truncated window list. */
+        EnumCtx stopping = {0};
+        simulateStopping = TRUE;
+        CHECK(EnumTopLevel(top,(LPARAM)&stopping) == FALSE);
+        CHECK(stopping.failed);
+        CHECK(stopping.cnt == 0);
+        simulateStopping = FALSE;
+        free(stopping.buf);
+    }
     {
         HungFixture hung = {0};
         EnumCtx hungCtx = {0};

@@ -1229,8 +1229,20 @@ static void ApplyAlwaysOnTop(void)
 
 static void RestoreFromTray(void)
 {
+    WINDOWPLACEMENT wp;
+    BOOL maximized = FALSE;
+
+    /* IsZoomed is FALSE for a minimized or hidden window, so asking it here
+       would restore a window that had been maximized as a normal one. The
+       placement's WPF_RESTORETOMAXIMIZED flag is what survives minimizing. */
+    ZeroMemory(&wp, sizeof(wp));
+    wp.length = sizeof(wp);
+    if (GetWindowPlacement(g_hMain, &wp))
+        maximized = (wp.showCmd == SW_SHOWMAXIMIZED) ||
+                    ((wp.flags & WPF_RESTORETOMAXIMIZED) != 0);
+
     ShowWindow(g_hMain, SW_SHOW);
-    ShowWindow(g_hMain, IsZoomed(g_hMain) ? SW_SHOWMAXIMIZED : SW_RESTORE);
+    ShowWindow(g_hMain, maximized ? SW_SHOWMAXIMIZED : SW_RESTORE);
     SetForegroundWindow(g_hMain);
     if (!g_cfg.hideWhenMinimized) TrayRemove();
 }
@@ -1520,6 +1532,14 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_SETTINGCHANGE:
+        /* This is broadcast for every system setting, most of which cannot
+           affect our fonts. Rebuilding five fonts, a brush and every
+           control's font on each one is pure waste, so only react to the
+           two that actually change the message font. WM_THEMECHANGED below
+           is rare and always relevant, so it is handled unconditionally. */
+        if (wp != SPI_SETNONCLIENTMETRICS && wp != SPI_SETICONTITLELOGFONT)
+            break;
+        /* fall through */
     case WM_THEMECHANGED: {
         int i;
         CreateAppFont();
@@ -1769,6 +1789,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPWSTR cmdLine, int nC
     }
 
     if (g_hAccel) DestroyAcceleratorTable(g_hAccel);
-    if (mutex) { ReleaseMutex(mutex); CloseHandle(mutex); }
+    /* The mutex was created with bInitialOwner FALSE and is never acquired,
+       so there is nothing to release; ReleaseMutex would just fail with
+       ERROR_NOT_OWNER. Closing the handle is what drops the name. */
+    if (mutex) CloseHandle(mutex);
     return (int)msg.wParam;
 }
