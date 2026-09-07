@@ -1,6 +1,6 @@
 # Recharged Classic Task Manager — System Workspace
 
-A native Win32 system task manager, built on the six-tab layout of the
+A charged native Win32 system task manager, built on the six-tab layout of the
 classic Windows Task Manager. Version 2 adds a live resource dashboard,
 process investigation tools, and a styled, DPI-aware workspace.
 
@@ -52,6 +52,10 @@ Pause prevents scheduled sampling; an in-flight collection may finish.
 Refreshing or switching tabs while paused collects once. Rates are averages
 over the interval between adapter samples; disconnects and counter resets
 start a new baseline. Protected processes can expose fewer details.
+
+![1](.\images\1.png)
+
+![2](.\images\2.png)
 
 ---
 
