@@ -189,6 +189,36 @@ static void TestImplausibleThresholdsAreUnknown(void)
     CHECK(!out.thresholdsKnown);
 }
 
+static void TestCollectThrottles(void)
+{
+    const SensorReading *model;
+    int first = 0, second = 0;
+
+    /* A fresh module has published nothing. */
+    Sensors_Reset();
+    model = Sensors_Lock(&first); (void)model; Sensors_Unlock();
+    CHECK(first == 0);
+
+    Sensors_Collect(1000000);
+    model = Sensors_Lock(&first); (void)model; Sensors_Unlock();
+
+    /* Well inside the interval: the model must not be resampled. A second
+       collection here would mean every collector tick pays the drive I/O. */
+    CHECK(Sensors_Collect_LastTick() == 1000000);
+    Sensors_Collect(1000000 + SENSORS_COLLECT_INTERVAL_MS - 1);
+    CHECK(Sensors_Collect_LastTick() == 1000000);
+
+    /* Past the interval it samples again. */
+    Sensors_Collect(1000000 + SENSORS_COLLECT_INTERVAL_MS);
+    CHECK(Sensors_Collect_LastTick() == 1000000 + SENSORS_COLLECT_INTERVAL_MS);
+
+    model = Sensors_Lock(&second); (void)model; Sensors_Unlock();
+    CHECK(second >= 0);
+    Sensors_Reset();
+    model = Sensors_Lock(&second); (void)model; Sensors_Unlock();
+    CHECK(second == 0);            /* Reset clears the published model */
+}
+
 int main(void)
 {
     /* The stride the development machine reported equals the struct
@@ -207,6 +237,7 @@ int main(void)
     TestSkipsSentinelAndImplausibleSensors();
     TestRejectsWhenNoSensorIsUsable();
     TestImplausibleThresholdsAreUnknown();
+    TestCollectThrottles();
     printf("sensors: %d failures\n", failures);
     return failures ? 1 : 0;
 }

@@ -156,3 +156,69 @@ int Sensors_ReadDrives(SensorReading *out, int max)
     }
     return count;
 }
+
+/* ------------------------------------------------------- published model -- */
+
+static SRWLOCK       s_lock = SRWLOCK_INIT;
+static SensorReading s_model[SENSORS_MAX];
+static int           s_modelCount;
+static ULONGLONG     s_lastCollect;
+
+BOOL Sensors_IsElevated(void)
+{
+    /* Queried here rather than through main.c's App_IsElevated so this
+       module stays linkable into a headless suite on its own. */
+    HANDLE token = NULL;
+    TOKEN_ELEVATION elevation;
+    DWORD size;
+    BOOL result = FALSE;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return FALSE;
+    if (GetTokenInformation(token, TokenElevation, &elevation,
+                            sizeof(elevation), &size))
+        result = elevation.TokenIsElevated != 0;
+    CloseHandle(token);
+    return result;
+}
+
+void Sensors_Collect(ULONGLONG nowTick)
+{
+    SensorReading readings[SENSORS_MAX];
+    int count;
+
+    /* Drive temperatures move slowly and a handle per drive per tick is
+       real I/O, so this runs at a fifth of the collector's cadence. */
+    if (s_lastCollect && nowTick - s_lastCollect < SENSORS_COLLECT_INTERVAL_MS)
+        return;
+    s_lastCollect = nowTick;
+
+    ZeroMemory(readings, sizeof(readings));
+    count = Sensors_ReadDrives(readings, SENSORS_MAX);
+
+    AcquireSRWLockExclusive(&s_lock);
+    CopyMemory(s_model, readings, sizeof(s_model));
+    s_modelCount = count;
+    ReleaseSRWLockExclusive(&s_lock);
+}
+
+ULONGLONG Sensors_Collect_LastTick(void) { return s_lastCollect; }
+
+const SensorReading *Sensors_Lock(int *count)
+{
+    AcquireSRWLockShared(&s_lock);
+    if (count) *count = s_modelCount;
+    return s_model;
+}
+
+void Sensors_Unlock(void)
+{
+    ReleaseSRWLockShared(&s_lock);
+}
+
+void Sensors_Reset(void)
+{
+    AcquireSRWLockExclusive(&s_lock);
+    ZeroMemory(s_model, sizeof(s_model));
+    s_modelCount = 0;
+    ReleaseSRWLockExclusive(&s_lock);
+    s_lastCollect = 0;
+}

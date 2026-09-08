@@ -9,6 +9,7 @@
 #include "app.h"
 #include "ntapi.h"
 #include "gpu.h"
+#include "sensors.h"
 
 /* --------------------------------------------------------- native API --- */
 
@@ -343,6 +344,10 @@ static DWORD WINAPI CollectorProc(LPVOID param)
            tab a sample behind. Gpu_Collect returns immediately unless
            something has enabled it. */
         Gpu_Collect(GetTickCount64());
+        /* Unlike the GPU, temperatures are not gated on a tab: they are
+           cheap at a five second cadence and the Sensors tab must have
+           something to show the moment it opens. */
+        Sensors_Collect(GetTickCount64());
 
         if (g_tabCollect)
             g_tabCollect((int)InterlockedCompareExchange(&g_activeTab, 0, 0));

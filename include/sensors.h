@@ -39,4 +39,25 @@ BOOL Sensors_ParseTemperature(const void *buffer, DWORD returned,
    silently -- an absent drive is not an error. Returns the count. */
 int Sensors_ReadDrives(SensorReading *out, int max);
 
+/* TRUE when the process is running elevated. Queried inside this module
+   rather than through main.c's App_IsElevated so sensors.c stays linkable
+   into a headless suite on its own, as gpu.c is. */
+BOOL Sensors_IsElevated(void);
+
+/* Samples every source and republishes the model. Throttled to
+   SENSORS_COLLECT_INTERVAL_MS; called from the collector thread only. */
+void Sensors_Collect(ULONGLONG nowTick);
+
+/* Shared-lock read of the published model, mirroring Gpu_Lock/Gpu_Unlock.
+   The returned pointer is valid until Sensors_Unlock. */
+const SensorReading *Sensors_Lock(int *count);
+void Sensors_Unlock(void);
+
+/* Clears the model. Called on shutdown from the collector's own thread. */
+void Sensors_Reset(void);
+
+/* Test-only introspection: lets the headless suite observe the throttle
+   without waiting five real seconds. Not used by any production path. */
+ULONGLONG Sensors_Collect_LastTick(void);
+
 #endif /* CTM_SENSORS_H */
