@@ -398,9 +398,16 @@ static volatile LONG    s_enabled;
 static ULONGLONG        s_lastCollect;
 static GpuAccumulator   s_accum;   /* ~14 KB: static, not on the stack */
 
-void Gpu_SetEnabled(BOOL enabled)
+void Gpu_SetEnabled(unsigned owner, BOOL enabled)
 {
-    InterlockedExchange(&s_enabled, enabled ? 1 : 0);
+    LONG previous, updated;
+    /* Compare-and-swap rather than a plain exchange: the owners are both
+       on the UI thread today, but the flag is read from the collector
+       thread, and a read-modify-write of a shared word must not be torn. */
+    do {
+        previous = InterlockedCompareExchange(&s_enabled, 0, 0);
+        updated = enabled ? (previous | (LONG)owner) : (previous & ~(LONG)owner);
+    } while (InterlockedCompareExchange(&s_enabled, updated, previous) != previous);
 }
 
 BOOL Gpu_IsEnabled(void)
@@ -536,4 +543,5 @@ void Gpu_Reset(void)
     s_processCount = 0;
     ReleaseSRWLockExclusive(&s_lock);
     s_lastCollect = 0;
+    InterlockedExchange(&s_enabled, 0);
 }

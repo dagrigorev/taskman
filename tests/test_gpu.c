@@ -295,10 +295,33 @@ static void TestAggregateResetClears(void)
    the enumeration cost until something asks for the data. */
 static void TestEnabledFlag(void)
 {
+    /* Two independent owners. Collection runs while either wants it, so
+       leaving the Sensors tab must not switch off a process column that
+       is still visible -- and vice versa. */
     CHECK(Gpu_IsEnabled() == FALSE);
-    Gpu_SetEnabled(TRUE);
+
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, TRUE);
     CHECK(Gpu_IsEnabled() == TRUE);
-    Gpu_SetEnabled(FALSE);
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, FALSE);
+    CHECK(Gpu_IsEnabled() == FALSE);
+
+    /* Both on, then one off: still on. This is the case a single BOOL
+       got wrong. */
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, TRUE);
+    Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, TRUE);
+    CHECK(Gpu_IsEnabled() == TRUE);
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, FALSE);
+    CHECK(Gpu_IsEnabled() == TRUE);
+    Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, FALSE);
+    CHECK(Gpu_IsEnabled() == FALSE);
+
+    /* Clearing an owner that was never set is not an error, and clearing
+       one owner twice does not clear the other. */
+    Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, TRUE);
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, FALSE);
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, FALSE);
+    CHECK(Gpu_IsEnabled() == TRUE);
+    Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, FALSE);
     CHECK(Gpu_IsEnabled() == FALSE);
 }
 
@@ -308,7 +331,7 @@ static void TestCollectSkippedWhenDisabled(void)
     int count = -1;
     const GpuAdapter *model;
 
-    Gpu_SetEnabled(FALSE);
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, FALSE);
     Gpu_Collect(GetTickCount64());
     model = Gpu_Lock(&count);
     CHECK(count == 0);

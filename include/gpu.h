@@ -145,7 +145,16 @@ typedef struct {
 /* Published from the UI thread with an interlocked store; the collector
    never reads g_cfg. Defaults to FALSE so no PDH query is opened until
    the Sensors tab or the per-process column asks for data. */
-void Gpu_SetEnabled(BOOL enabled);
+/* GPU collection is wanted by more than one part of the UI, and they turn
+   it on and off independently: the Sensors tab while it is active, the
+   Processes tab while its GPU column is visible. A single flag would let
+   whichever switched off last cancel the other, so each owner gets a bit
+   and collection runs while any bit is set. */
+#define GPU_OWNER_SENSORS        0x1u
+#define GPU_OWNER_PROCESS_COLUMN 0x2u
+
+void Gpu_SetEnabled(unsigned owner, BOOL enabled);
+/* TRUE while any owner wants collection. */
 BOOL Gpu_IsEnabled(void);
 
 /* Called on the collector thread, before the per-tab collectors. Does

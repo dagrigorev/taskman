@@ -297,14 +297,14 @@ static BOOL sens_notify(TabPage *p, NMHDR *nm, LRESULT *result)
 }
 
 /* Collection is gated on this tab so that a user who never opens it never
-   pays for the PDH query -- around a thousand engine instances on a machine
-   with three adapters. Unit 4's per-process GPU column will enable it
-   independently; when that lands, this must stop being the only owner of
-   the flag. */
+   pays for the PDH query -- around a thousand engine instances on a
+   machine with three adapters. The Processes tab's GPU column owns its own
+   bit, so leaving this tab no longer switches collection off underneath
+   it. */
 static void SensActivate(TabPage *p, BOOL active)
 {
     (void)p;
-    Gpu_SetEnabled(active);
+    Gpu_SetEnabled(GPU_OWNER_SENSORS, active);
 }
 
 static HWND SensPrimary(TabPage *p)
