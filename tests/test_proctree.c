@@ -308,6 +308,64 @@ static void TestCollapseSet(void)
     ProcCollapse_Destroy(set);
 }
 
+static void TestAggregateFoldsGpuLikeCpu(void)
+{
+    /* A three-level chain: grandparent 0 -> parent 1 -> children 2 and 3.
+       GPU folds exactly as CPU does, so the same shape is asserted for
+       both and a fold that touches one but not the other fails here. */
+    ProcRow rows[4];
+    ProcTreeInfo tree[4];
+    int firstRoot = -1;
+
+    ZeroMemory(rows, sizeof(rows));
+    ZeroMemory(tree, sizeof(tree));
+    rows[0].pid = 100; rows[0].parentPid = 0;
+    rows[1].pid = 200; rows[1].parentPid = 100;
+    rows[2].pid = 300; rows[2].parentPid = 200;
+    rows[3].pid = 400; rows[3].parentPid = 200;
+    rows[0].cpuPct = 1.0f; rows[0].gpuPct = 2.0f;  rows[0].gpuKnown = TRUE;
+    rows[1].cpuPct = 2.0f; rows[1].gpuPct = 4.0f;  rows[1].gpuKnown = TRUE;
+    rows[2].cpuPct = 4.0f; rows[2].gpuPct = 8.0f;  rows[2].gpuKnown = TRUE;
+    rows[3].cpuPct = 8.0f; rows[3].gpuPct = 16.0f; rows[3].gpuKnown = TRUE;
+
+    ProcTree_Link(rows, tree, 4, &firstRoot);
+    ProcTree_Aggregate(rows, tree, 4);
+
+    /* Leaves are their own value. */
+    CHECK(tree[2].gpuRollup == 8.0f);
+    CHECK(tree[3].gpuRollup == 16.0f);
+    /* The parent carries both children and itself. */
+    CHECK(tree[1].gpuRollup == 28.0f);
+    CHECK(tree[1].cpuRollup == 14.0f);
+    /* And the whole chain reaches the root. */
+    CHECK(tree[0].gpuRollup == 30.0f);
+    CHECK(tree[0].cpuRollup == 15.0f);
+}
+
+static void TestAggregateTreatsUnknownGpuAsZero(void)
+{
+    /* A row whose GPU is unknown contributes nothing rather than adding a
+       stale value, and does not make its parent's rollup unknown -- unlike
+       memory, GPU has no rollup-known flag, because a process the query
+       never saw is using no measurable GPU. */
+    ProcRow rows[2];
+    ProcTreeInfo tree[2];
+    int firstRoot = -1;
+
+    ZeroMemory(rows, sizeof(rows));
+    ZeroMemory(tree, sizeof(tree));
+    rows[0].pid = 100; rows[0].parentPid = 0;
+    rows[1].pid = 200; rows[1].parentPid = 100;
+    rows[0].gpuPct = 3.0f;  rows[0].gpuKnown = TRUE;
+    rows[1].gpuPct = 99.0f; rows[1].gpuKnown = FALSE;   /* stale, unusable */
+
+    ProcTree_Link(rows, tree, 2, &firstRoot);
+    ProcTree_Aggregate(rows, tree, 2);
+
+    CHECK(tree[1].gpuRollup == 0.0f);
+    CHECK(tree[0].gpuRollup == 3.0f);
+}
+
 int main(void)
 {
     CHECK(sizeof(ProcTreeInfo) > 0);
@@ -326,6 +384,8 @@ int main(void)
     TestSortUpdatesFirstRoot();
     TestFlattenSkipsCollapsed();
     TestCollapseSet();
+    TestAggregateFoldsGpuLikeCpu();
+    TestAggregateTreatsUnknownGpuAsZero();
     printf("proctree: %d failures\n", failures);
     return failures ? 1 : 0;
 }

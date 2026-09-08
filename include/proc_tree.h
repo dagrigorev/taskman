@@ -23,6 +23,8 @@ typedef struct {
     WCHAR     userName[PROC_USER_MAX];
     WCHAR     description[PROC_DESC_MAX];
     float     cpuPct;
+    float     gpuPct;         /* summed across engines and adapters       */
+    BOOL      gpuKnown;       /* FALSE when the query never saw this pid  */
     ULONGLONG privateBytes;
     BOOL      memoryKnown;
     BOOL      ownedByCurrentUser;
@@ -41,6 +43,7 @@ typedef struct {
     BOOL      collapsed;
     BOOL      context;        /* ancestor of a match, not a match itself    */
     float     cpuRollup;      /* subtree total, includes this row           */
+    float     gpuRollup;      /* subtree total, includes this row           */
     ULONGLONG memRollup;
     BOOL      memRollupKnown; /* FALSE only when nothing in subtree is known */
 } ProcTreeInfo;
@@ -59,10 +62,13 @@ typedef struct {
 void ProcTree_Link(const ProcRow *rows, ProcTreeInfo *tree, int count,
                    int *firstRoot);
 
-/* Computes subtree totals into cpuRollup/memRollup/memRollupKnown.
+/* Computes subtree totals into cpuRollup/gpuRollup/memRollup/memRollupKnown.
    Rollups include the row itself. Rows with memoryKnown == FALSE contribute
    nothing to memRollup; memRollupKnown is FALSE only when no row in the
-   subtree has a known value. Requires ProcTree_Link to have run. */
+   subtree has a known value. Rows with gpuKnown == FALSE contribute nothing
+   to gpuRollup and there is no corresponding known flag: a process the GPU
+   query never saw is using no measurable GPU, which is a real zero rather
+   than an absence. Requires ProcTree_Link to have run. */
 void ProcTree_Aggregate(const ProcRow *rows, ProcTreeInfo *tree, int count);
 
 /* Keeps matches and their ancestors, drops the rest, and marks ancestors

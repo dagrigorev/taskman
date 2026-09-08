@@ -39,6 +39,7 @@ void ProcTree_Link(const ProcRow *rows, ProcTreeInfo *tree, int count,
         tree[i].depth = tree[i].childCount = 0;
         tree[i].collapsed = FALSE;
         tree[i].cpuRollup = 0.0f;
+        tree[i].gpuRollup = 0.0f;
         tree[i].memRollup = 0;
         tree[i].memRollupKnown = FALSE;
     }
@@ -136,6 +137,7 @@ void ProcTree_Aggregate(const ProcRow *rows, ProcTreeInfo *tree, int count)
     /* Seed every node with its own values, and learn how deep to fold. */
     for (i = 0; i < count; ++i) {
         tree[i].cpuRollup      = rows[i].cpuPct;
+        tree[i].gpuRollup      = rows[i].gpuKnown ? rows[i].gpuPct : 0.0f;
         tree[i].memRollup      = rows[i].memoryKnown ? rows[i].privateBytes : 0;
         tree[i].memRollupKnown = rows[i].memoryKnown;
         if (tree[i].depth > maxDepth) maxDepth = tree[i].depth;
@@ -152,6 +154,7 @@ void ProcTree_Aggregate(const ProcRow *rows, ProcTreeInfo *tree, int count)
             int parent = tree[i].parent;
             if (tree[i].depth != depth || parent < 0) continue;
             tree[parent].cpuRollup += tree[i].cpuRollup;
+            tree[parent].gpuRollup += tree[i].gpuRollup;
             tree[parent].memRollup += tree[i].memRollup;
             if (tree[i].memRollupKnown) tree[parent].memRollupKnown = TRUE;
         }
