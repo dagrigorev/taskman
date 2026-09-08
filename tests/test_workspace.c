@@ -302,6 +302,54 @@ int main(void)
     SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
     Capture(hwnd, L"tests/.build/workspace-performance.bmp");
     SwitchToTab(TAB_PROCESSES, FALSE);
+    /* Clear the search before the GPU column check: a filtered list can be
+       a single process that genuinely uses no GPU, which would make the
+       "some row has a figure" assertion below fail for the wrong reason. */
+    SendMessageW(page, WM_COMMAND, IDC_PROC_CLEAR, 0);
+    Pump(120);
+    {
+        /* The column ships hidden, and showing it is what turns GPU
+           collection on. Driven through WM_COMMAND rather than the popup
+           menu, which would block on TrackPopupMenu. */
+        const int gpuColumn = 6;
+        CHECK(Header_GetItemCount(ListView_GetHeader(list)) >= 7);
+        CHECK(ListView_GetColumnWidth(list, gpuColumn) == 0);
+        CHECK(!Gpu_IsEnabled());
+
+        SendMessageW(page, WM_COMMAND, IDM_PROC_COL_FIRST + gpuColumn, 0);
+        Pump(120);
+        CHECK(ListView_GetColumnWidth(list, gpuColumn) > 0);
+        CHECK(Gpu_IsEnabled());
+
+        {
+            /* Wait out the discarded first sample and the one second
+               interval, then confirm the column actually renders figures
+               rather than only that the toggle worked. Rows are stamped
+               unknown until a sample lands, so an empty column here would
+               mean the stamp never reached them. */
+            int r, populated = 0, rows;
+            Pump(2600);
+            SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_REFRESH, 0);
+            Pump(400);
+            rows = ListView_GetItemCount(list);
+            /* Read what the control renders rather than the model: this
+               also proves the display case is wired to the right column. */
+            for (r = 0; r < rows; ++r) {
+                WCHAR cell[32] = {0};
+                ListView_GetItemText(list, r, gpuColumn, cell, ARRAYSIZE(cell));
+                if (cell[0]) ++populated;
+            }
+            fprintf(stderr, "workspace: %d of %d rows render a GPU figure\n",
+                    populated, rows);
+            CHECK(populated > 0);
+            Capture(hwnd, L"tests/.build/workspace-gpu-column.bmp");
+        }
+
+        SendMessageW(page, WM_COMMAND, IDM_PROC_COL_FIRST + gpuColumn, 0);
+        Pump(120);
+        CHECK(ListView_GetColumnWidth(list, gpuColumn) == 0);
+        CHECK(!Gpu_IsEnabled());
+    }
     SendMessageW(page, WM_COMMAND, IDC_PROC_CLEAR, 0);
     SetWindowPos(hwnd, NULL, 0, 0, 1180, 720, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     LayoutMain(); Pump(30);

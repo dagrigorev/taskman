@@ -11,6 +11,8 @@
 #include "proc_tree.h"
 #include "gpu.h"
 
+#define PROC_COL_GPU 6
+
 /* ----------------------------------------------------------------- model -- */
 
 /* collector-thread state (no lock needed - worker thread only) */
@@ -541,6 +543,8 @@ static int ProcCompare(const void *a, const void *b)
                 : (ra->privateBytes < rb->privateBytes) ? -1 : 0; break;
     case 4: cmp = lstrcmpiW(ra->description, rb->description); break;
     case 5: cmp = (ra->pid > rb->pid) - (ra->pid < rb->pid); break;
+    case PROC_COL_GPU: cmp = (ra->gpuPct > rb->gpuPct) ? 1
+                           : (ra->gpuPct < rb->gpuPct) ? -1 : 0; break;
     default: break;
     }
     if (!cmp) cmp = (ra->pid > rb->pid) - (ra->pid < rb->pid);
@@ -553,6 +557,8 @@ static int ProcTreeCompare(const ProcRow *ra, const ProcTreeInfo *ta,
 {
     float ca = ta->collapsed ? ta->cpuRollup : ra->cpuPct;
     float cb = tb->collapsed ? tb->cpuRollup : rb->cpuPct;
+    float ga = ta->collapsed ? ta->gpuRollup : ra->gpuPct;
+    float gb = tb->collapsed ? tb->gpuRollup : rb->gpuPct;
     ULONGLONG ma = ta->collapsed ? ta->memRollup : ra->privateBytes;
     ULONGLONG mb = tb->collapsed ? tb->memRollup : rb->privateBytes;
     int cmp = 0;
@@ -564,6 +570,7 @@ static int ProcTreeCompare(const ProcRow *ra, const ProcTreeInfo *ta,
     case 3: cmp = (ma > mb) - (ma < mb); break;
     case 4: cmp = lstrcmpiW(ra->description, rb->description); break;
     case 5: cmp = (ra->pid > rb->pid) - (ra->pid < rb->pid); break;
+    case PROC_COL_GPU: cmp = (ga > gb) - (ga < gb); break;
     default: break;
     }
     if (!cmp) cmp = (ra->pid > rb->pid) - (ra->pid < rb->pid);
@@ -849,6 +856,10 @@ static void ProcCreate(TabPage *p)
         UI_AddColumn(s_list, 3, L"Private memory",                 78, LVCFMT_RIGHT);
         UI_AddColumn(s_list, 4, L"Description",                   110, LVCFMT_LEFT);
         UI_AddColumn(s_list, 5, L"PID", 40, LVCFMT_RIGHT);
+        UI_AddColumn(s_list, PROC_COL_GPU, L"GPU", 42, LVCFMT_RIGHT);
+        /* Hidden until asked for: showing it is what makes the collector
+           enumerate roughly a thousand GPU engine counter instances. */
+        ListView_SetColumnWidth(s_list, PROC_COL_GPU, 0);
         UI_SetHeaderSortArrow(s_list, g_sortCol, g_sortDir);
         s_listTheme = OpenThemeData(s_list, L"Explorer::ListView");
     }
@@ -1313,6 +1324,11 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
                 if (draw->iSubItem == 2) {
                     float cpu = collapsed ? g_tree[index].cpuRollup : g_view[index].cpuPct;
                     bg = cpu >= 15 ? RGB(255, 218, 178) : cpu >= 1 ? RGB(255, 241, 217) : RGB(249, 246, 238);
+                } else if (draw->iSubItem == PROC_COL_GPU) {
+                    float gpu = collapsed ? g_tree[index].gpuRollup
+                                          : g_view[index].gpuPct;
+                    bg = gpu >= 15 ? RGB(214, 232, 255) :
+                         gpu >= 1  ? RGB(235, 244, 255) : RGB(246, 249, 253);
                 } else if (draw->iSubItem == 3) {
                     ULONGLONG mem = (collapsed && g_tree[index].memRollupKnown)
                         ? g_tree[index].memRollup : g_view[index].privateBytes;
@@ -1369,6 +1385,20 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
             case 4:
                 lstrcpynW(di->item.pszText, r->description, di->item.cchTextMax);
                 break;
+            case PROC_COL_GPU:
+                /* An unmeasured process shows nothing rather than 0.0%,
+                   which would claim the GPU was sampled and found idle. */
+                if (g_tree && g_tree[row].collapsed)
+                    StringCchPrintfW(di->item.pszText,
+                                     (size_t)di->item.cchTextMax,
+                                     L"%.1f%%", g_tree[row].gpuRollup);
+                else if (r->gpuKnown)
+                    StringCchPrintfW(di->item.pszText,
+                                     (size_t)di->item.cchTextMax,
+                                     L"%.1f%%", r->gpuPct);
+                else
+                    di->item.pszText[0] = L'\0';
+                break;
             }
         }
         return TRUE;
@@ -1410,22 +1440,51 @@ static HANDLE ProcOpenTarget(const ProcRow *row)
     return process;
 }
 
+/* Toggling a column's width is how this tab shows and hides columns; there
+   is no separate visibility state to keep in step. The GPU column
+   additionally owns a bit of the GPU collection flag, so the cost is paid
+   only while the column is on screen. */
+static void ProcToggleColumn(int column)
+{
+    int count = Header_GetItemCount(ListView_GetHeader(s_list));
+    BOOL showing;
+    if (!s_list || column < 1 || column >= count) return;
+    showing = ListView_GetColumnWidth(s_list, column) == 0;
+    ListView_SetColumnWidth(s_list, column,
+                            showing ? LVSCW_AUTOSIZE_USEHEADER : 0);
+    if (column == PROC_COL_GPU)
+        Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, showing);
+}
+
 static void ProcColumns(HWND owner)
 {
-    static const WCHAR *names[] = { L"Image Name", L"User Name", L"CPU", L"Memory", L"Description", L"PID" };
+    /* The labels come from the header itself. A private copy of the names
+       here would drift the moment a column is added or renamed -- and
+       being indexed by a hardcoded count, drift would mean an out-of-range
+       read rather than a wrong string. */
     HMENU menu = CreatePopupMenu();
     POINT pt;
-    int i, chosen;
+    int i, chosen, count;
     if (!menu) return;
-    for (i = 1; i < 6; ++i)
-        AppendMenuW(menu, (UINT)(MF_STRING | (ListView_GetColumnWidth(s_list, i) ? MF_CHECKED : 0)),
-            (UINT_PTR)(IDM_PROC_COL_FIRST + i), names[i]);
+    count = Header_GetItemCount(ListView_GetHeader(s_list));
+    for (i = 1; i < count; ++i) {
+        WCHAR label[64] = {0};
+        LVCOLUMNW column;
+        ZeroMemory(&column, sizeof(column));
+        column.mask = LVCF_TEXT;
+        column.pszText = label;
+        column.cchTextMax = ARRAYSIZE(label);
+        if (!ListView_GetColumn(s_list, i, &column)) continue;
+        AppendMenuW(menu, (UINT)(MF_STRING |
+            (ListView_GetColumnWidth(s_list, i) ? MF_CHECKED : 0)),
+            (UINT_PTR)(IDM_PROC_COL_FIRST + i), label);
+    }
     GetCursorPos(&pt);
-    chosen = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, owner, NULL)
+    chosen = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                 pt.x, pt.y, 0, owner, NULL)
              - IDM_PROC_COL_FIRST;
     DestroyMenu(menu);
-    if (chosen >= 1 && chosen < 6)
-        ListView_SetColumnWidth(s_list, chosen, ListView_GetColumnWidth(s_list, chosen) ? 0 : LVSCW_AUTOSIZE_USEHEADER);
+    ProcToggleColumn(chosen);
 }
 
 static BOOL ProcWriteBytes(HANDLE file, const void *data, DWORD bytes)
@@ -1566,6 +1625,12 @@ static void ProcCopyDetails(HWND owner)
 static void ProcCommand(TabPage *p, int id, int code, HWND ctl)
 {
     (void)p; (void)code; (void)ctl;
+    /* The column toggles occupy a reserved id block; route them through the
+       same helper the popup menu uses so both paths behave identically. */
+    if (id >= IDM_PROC_COL_FIRST && id <= IDM_PROC_COL_LAST) {
+        ProcToggleColumn(id - IDM_PROC_COL_FIRST);
+        return;
+    }
     switch (id) {
     case IDM_PROC_FIND:
         SetFocus(s_search); SendMessageW(s_search, EM_SETSEL, 0, -1); break;
