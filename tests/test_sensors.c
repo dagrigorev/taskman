@@ -219,6 +219,22 @@ static void TestCollectThrottles(void)
     CHECK(second == 0);            /* Reset clears the published model */
 }
 
+static void TestThreadDetachIsSafeWithoutAnApartment(void)
+{
+    /* Every unelevated run reaches thread exit having never entered a COM
+       apartment, so detaching must be a no-op rather than an unbalanced
+       CoUninitialize. Calling it twice must also be safe: the collector
+       thread runs it once, but nothing structurally prevents a second. */
+    Sensors_ThreadDetach();
+    Sensors_ThreadDetach();
+
+    /* Sensors_Reset must no longer touch COM at all -- it runs on the UI
+       thread during WM_DESTROY, where releasing the collector's apartment
+       is not possible and releasing the UI thread's own would be wrong. */
+    Sensors_Reset();
+    Sensors_ThreadDetach();
+}
+
 int main(void)
 {
     /* The stride the development machine reported equals the struct
@@ -238,6 +254,7 @@ int main(void)
     TestRejectsWhenNoSensorIsUsable();
     TestImplausibleThresholdsAreUnknown();
     TestCollectThrottles();
+    TestThreadDetachIsSafeWithoutAnApartment();
     printf("sensors: %d failures\n", failures);
     return failures ? 1 : 0;
 }

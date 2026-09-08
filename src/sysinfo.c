@@ -368,6 +368,10 @@ static DWORD WINAPI CollectorProc(LPVOID param)
         if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) break;
         /* WAIT_OBJECT_0 + 1 (wake) and WAIT_TIMEOUT both fall through */
     }
+    /* Sensors_Collect may have entered a COM apartment on this thread to
+       read ACPI thermal zones. It has to be released here, on the thread
+       that entered it, and before that thread exits. */
+    Sensors_ThreadDetach();
     return 0;
 }
 

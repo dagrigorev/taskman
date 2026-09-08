@@ -338,8 +338,13 @@ void Sensors_Reset(void)
     s_modelCount = 0;
     ReleaseSRWLockExclusive(&s_lock);
     s_lastCollect = 0;
-    /* The host calls this on the collector's own thread during shutdown,
-       after SysInfo_Stop has joined it, so the apartment being torn down
-       is the one SensorComInit created. */
+}
+
+void Sensors_ThreadDetach(void)
+{
+    /* Deliberately NOT done from Sensors_Reset: that runs on the UI thread
+       during WM_DESTROY, and CoUninitialize there would decrement the UI
+       thread's own reference count while leaving the collector's apartment
+       -- the one SensorComInit actually entered -- standing. */
     if (s_comReady) { CoUninitialize(); s_comReady = FALSE; }
 }

@@ -60,8 +60,16 @@ void Sensors_Collect(ULONGLONG nowTick);
 const SensorReading *Sensors_Lock(int *count);
 void Sensors_Unlock(void);
 
-/* Clears the model. Called on shutdown from the collector's own thread. */
+/* Clears the published model. Safe from any thread. */
 void Sensors_Reset(void);
+
+/* Releases the COM apartment this module may have initialised. MUST be
+   called on the collector thread, immediately before it exits: COM
+   apartments are per-thread, so calling it anywhere else would leave the
+   collector's apartment standing and decrement some other thread's COM
+   reference count instead. Does nothing when no apartment was entered,
+   which is every unelevated run. */
+void Sensors_ThreadDetach(void);
 
 /* Test-only introspection: lets the headless suite observe the throttle
    without waiting five real seconds. Not used by any production path. */
