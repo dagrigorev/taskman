@@ -9,6 +9,7 @@
 #include <wctype.h>
 #include "ui.h"
 #include "proc_tree.h"
+#include "gpu.h"
 
 /* ----------------------------------------------------------------- model -- */
 
@@ -318,6 +319,24 @@ static void LookupMetadata(ProcRow *row)
     CloseHandle(process);
 }
 
+/* Per-process GPU is published by the collector thread before this tab's
+   collector runs, so the figure is already current. A pid the query never
+   saw is unknown rather than zero: the column shows an empty cell for it,
+   which is honest about a process whose usage was not measured. The value
+   is cleared alongside the flag so a stale figure from an earlier sample
+   can never be displayed. */
+static void ProcStampGpu(ProcRow *row)
+{
+    double usage = 0;
+    if (Gpu_IsEnabled() && Gpu_ProcessUsage(row->pid, &usage)) {
+        row->gpuPct = (float)usage;
+        row->gpuKnown = TRUE;
+    } else {
+        row->gpuPct = 0.0f;
+        row->gpuKnown = FALSE;
+    }
+}
+
 static float ProcCpuDelta(ULONGLONG kernel, ULONGLONG user,
                           const PrevCpu *prev, ULONGLONG elapsed)
 {
@@ -409,6 +428,11 @@ void Proc_Collect(void)
                 break;
             }
         }
+
+        /* Outside the loop above: that one only runs for a process seen in
+           the previous sample, and a row whose CPU could not be computed
+           still deserves its GPU figure. */
+        ProcStampGpu(row);
 
         /* update prev table */
         if (newPrevCnt >= newPrevCap) {

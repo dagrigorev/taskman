@@ -32,7 +32,7 @@ taskman_add_test(test_launch
     ../src/tabs/tab_sensors.c ../src/sensors.c)
 taskman_add_test(test_collector ../src/gpu.c ../src/sensors.c)
 taskman_add_test(test_sysinfo_live ../src/sysinfo.c ../src/gpu.c ../src/sensors.c)
-taskman_add_test(test_processes ../src/tabs/proc_tree.c)
+taskman_add_test(test_processes ../src/tabs/proc_tree.c ../src/gpu.c)
 taskman_add_test(test_apps)
 taskman_add_test(test_network)
 taskman_add_test(test_services_users)

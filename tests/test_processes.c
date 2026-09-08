@@ -202,6 +202,25 @@ static void TestSelectPidExpandsAncestors(void)
     s_pendingPid = savedPending;
 }
 
+static void TestGpuStampLeavesUnknownRowsUnknown(void)
+{
+    /* With collection off, nothing has published per-process figures, so
+       every row must read unknown rather than a confident zero -- that is
+       what makes the column render an empty cell instead of "0.0%". */
+    ProcRow row;
+    ZeroMemory(&row, sizeof(row));
+    row.pid = 0xFFFFFFFEu;      /* cannot be a live pid */
+    row.gpuPct = 42.0f;         /* stale value from a previous sample */
+    row.gpuKnown = TRUE;
+
+    Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, FALSE);
+    Gpu_Reset();
+    ProcStampGpu(&row);
+
+    CHECK(row.gpuKnown == FALSE);
+    CHECK(row.gpuPct == 0.0f);  /* cleared, not left stale */
+}
+
 int main(void)
 {
     PrevCpu prev = {1,1,100,200};
@@ -214,6 +233,7 @@ int main(void)
     TestContextExcludedFromCountAndExport();
     TestTreeFallbackDegradesCleanly();
     TestSelectPidExpandsAncestors();
+    TestGpuStampLeavesUnknownRowsUnknown();
     /* Reset state the rest of main starts fresh from. */
     free(g_view); g_view = NULL; g_viewCnt = 0;
     free(g_tree); g_tree = NULL;
