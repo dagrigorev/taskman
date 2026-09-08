@@ -33,4 +33,10 @@ typedef struct {
 BOOL Sensors_ParseTemperature(const void *buffer, DWORD returned,
                               SensorReading *out);
 
+/* Probes PhysicalDrive0..31 and fills 'out' with one entry per drive that
+   reported a usable temperature. Drives that cannot be opened, do not
+   support the property, or return a malformed descriptor are skipped
+   silently -- an absent drive is not an error. Returns the count. */
+int Sensors_ReadDrives(SensorReading *out, int max);
+
 #endif /* CTM_SENSORS_H */

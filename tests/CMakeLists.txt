@@ -39,6 +39,7 @@ taskman_add_test(test_services_users)
 taskman_add_test(test_proctree)
 taskman_add_test(test_gpu)
 taskman_add_test(test_sensors)
+taskman_add_test(test_sensors_live)
 taskman_add_test(test_gpu_live)
 
 set(workspace_sources)

@@ -13,6 +13,8 @@
    STORAGE_TEMPERATURE_INFO and STORAGE_TEMPERATURE_DATA_DESCRIPTOR
    identically, so unlike ntapi.h this module needs no hand-declared shim. */
 
+#define SENSORS_MAX_PHYSICAL_DRIVES 32
+
 static BOOL SensorPlausible(int celsius)
 {
     return celsius >= SENSOR_TEMP_MIN && celsius <= SENSOR_TEMP_MAX;
@@ -71,4 +73,86 @@ BOOL Sensors_ParseTemperature(const void *buffer, DWORD returned,
                            SensorPlausible(out->critical) &&
                            out->warning <= out->critical;
     return TRUE;
+}
+
+/* --------------------------------------------------------------- drives -- */
+
+/* Builds "VENDOR PRODUCT" from the device descriptor's offsets, which are
+   byte offsets into the same buffer and are zero when absent. */
+static void SensorDriveName(const STORAGE_DEVICE_DESCRIPTOR *desc, DWORD returned,
+                            int index, WCHAR *out, size_t cch)
+{
+    const char *vendor = NULL, *product = NULL;
+    if (desc->VendorIdOffset && desc->VendorIdOffset < returned)
+        vendor = (const char *)desc + desc->VendorIdOffset;
+    if (desc->ProductIdOffset && desc->ProductIdOffset < returned)
+        product = (const char *)desc + desc->ProductIdOffset;
+    if (vendor || product) {
+        WCHAR wide[SENSOR_NAME_MAX];
+        char narrow[SENSOR_NAME_MAX];
+        StringCchPrintfA(narrow, ARRAYSIZE(narrow), "%s%s%s",
+                         vendor ? vendor : "", (vendor && product) ? " " : "",
+                         product ? product : "");
+        if (MultiByteToWideChar(CP_ACP, 0, narrow, -1, wide, ARRAYSIZE(wide))) {
+            /* Vendor and product are space padded in the descriptor. */
+            size_t end = wcslen(wide);
+            while (end > 0 && wide[end - 1] == L' ') wide[--end] = L'\0';
+            if (wide[0]) { StringCchCopyW(out, cch, wide); return; }
+        }
+    }
+    StringCchPrintfW(out, cch, L"PhysicalDrive%d", index);
+}
+
+static BOOL SensorQueryDrive(HANDLE drive, int index, SensorReading *out)
+{
+    STORAGE_PROPERTY_QUERY query;
+    BYTE buffer[1024];
+    DWORD returned = 0;
+
+    ZeroMemory(&query, sizeof(query));
+    query.PropertyId = StorageDeviceTemperatureProperty;
+    query.QueryType  = PropertyStandardQuery;
+    ZeroMemory(buffer, sizeof(buffer));
+    if (!DeviceIoControl(drive, IOCTL_STORAGE_QUERY_PROPERTY,
+                         &query, sizeof(query), buffer, sizeof(buffer),
+                         &returned, NULL))
+        return FALSE;
+    if (!Sensors_ParseTemperature(buffer, returned, out)) return FALSE;
+
+    /* The name is only worth fetching once the temperature is known good. */
+    ZeroMemory(&query, sizeof(query));
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType  = PropertyStandardQuery;
+    ZeroMemory(buffer, sizeof(buffer));
+    if (DeviceIoControl(drive, IOCTL_STORAGE_QUERY_PROPERTY,
+                        &query, sizeof(query), buffer, sizeof(buffer),
+                        &returned, NULL) &&
+        returned >= sizeof(STORAGE_DEVICE_DESCRIPTOR))
+        SensorDriveName((const STORAGE_DEVICE_DESCRIPTOR *)buffer, returned,
+                        index, out->name, SENSOR_NAME_MAX);
+    else
+        StringCchPrintfW(out->name, SENSOR_NAME_MAX, L"PhysicalDrive%d", index);
+    return TRUE;
+}
+
+int Sensors_ReadDrives(SensorReading *out, int max)
+{
+    int index, count = 0;
+    if (!out || max <= 0) return 0;
+    for (index = 0; index < SENSORS_MAX_PHYSICAL_DRIVES && count < max; ++index) {
+        WCHAR path[64];
+        HANDLE drive;
+        SensorReading reading;
+        StringCchPrintfW(path, ARRAYSIZE(path), L"\\\\.\\PhysicalDrive%d", index);
+        /* Zero desired access is what makes this work without elevation:
+           property queries need no read or write right on the device, and
+           asking for one would fail for an ordinary user. */
+        drive = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL);
+        if (drive == INVALID_HANDLE_VALUE) continue;
+        ZeroMemory(&reading, sizeof(reading));
+        if (SensorQueryDrive(drive, index, &reading)) out[count++] = reading;
+        CloseHandle(drive);
+    }
+    return count;
 }
