@@ -345,6 +345,50 @@ int main(void)
             Capture(hwnd, L"tests/.build/workspace-gpu-column.bmp");
         }
 
+        {
+            /* The menu the user actually right-clicks. Built without being
+               shown, because TrackPopupMenu blocks on input and can never
+               run here -- which is what left this construction uncovered.
+               Every entry must match the header it came from, so a column
+               added without touching the menu shows up as a mismatch here
+               rather than as a missing or mislabelled item at runtime. */
+            HMENU menu = ProcTest_BuildColumnMenu();
+            int columns = Header_GetItemCount(ListView_GetHeader(list));
+            CHECK(menu != NULL);
+            if (menu) {
+                int item, items = GetMenuItemCount(menu);
+                /* Column 0 is deliberately not offered: the process name
+                   cannot be hidden. */
+                CHECK(items == columns - 1);
+                for (item = 0; item < items; ++item) {
+                    WCHAR menuText[64] = {0}, headerText[64] = {0};
+                    LVCOLUMNW column;
+                    MENUITEMINFOW info;
+                    int source = item + 1;
+
+                    ZeroMemory(&info, sizeof(info));
+                    info.cbSize = sizeof(info);
+                    info.fMask = MIIM_STRING | MIIM_ID | MIIM_STATE;
+                    info.dwTypeData = menuText;
+                    info.cch = ARRAYSIZE(menuText);
+                    CHECK(GetMenuItemInfoW(menu, item, TRUE, &info));
+
+                    ZeroMemory(&column, sizeof(column));
+                    column.mask = LVCF_TEXT;
+                    column.pszText = headerText;
+                    column.cchTextMax = ARRAYSIZE(headerText);
+                    CHECK(ListView_GetColumn(list, source, &column));
+
+                    CHECK(lstrcmpW(menuText, headerText) == 0);
+                    CHECK(info.wID == (UINT)(IDM_PROC_COL_FIRST + source));
+                    /* The tick mirrors visibility, which is column width. */
+                    CHECK(((info.fState & MFS_CHECKED) != 0) ==
+                          (ListView_GetColumnWidth(list, source) != 0));
+                }
+                DestroyMenu(menu);
+            }
+        }
+
         SendMessageW(page, WM_COMMAND, IDM_PROC_COL_FIRST + gpuColumn, 0);
         Pump(120);
         CHECK(ListView_GetColumnWidth(list, gpuColumn) == 0);

@@ -178,6 +178,10 @@ void Proc_SelectPid(DWORD pid);
 BOOL  ProcTest_FindChildWithParent(DWORD *childPid, DWORD *parentPid);
 BOOL  ProcTest_IsVisiblePid(DWORD pid);
 DWORD ProcTest_PendingPid(void);
+/* Builds the Select Columns popup without showing it. TrackPopupMenu
+   blocks on user input, so the fixture cannot reach the menu any other
+   way. The caller owns the returned menu. */
+HMENU ProcTest_BuildColumnMenu(void);
 void Apps_Collect(void);
 void Apps_Reset(void);
 void Svc_Collect(void);

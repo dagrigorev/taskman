@@ -1456,16 +1456,20 @@ static void ProcToggleColumn(int column)
         Gpu_SetEnabled(GPU_OWNER_PROCESS_COLUMN, showing);
 }
 
-static void ProcColumns(HWND owner)
+/* Builds the column menu without showing it, so the construction can be
+   inspected by a test: TrackPopupMenu below blocks on user input and can
+   never run in a fixture, which would otherwise leave this untested.
+   The labels come from the header itself. A private copy of the names here
+   would drift the moment a column is added or renamed -- and being indexed
+   by a hardcoded count, drift would mean an out-of-range read rather than
+   a wrong string. Returns NULL if the menu cannot be created. */
+static HMENU ProcBuildColumnMenu(void)
 {
-    /* The labels come from the header itself. A private copy of the names
-       here would drift the moment a column is added or renamed -- and
-       being indexed by a hardcoded count, drift would mean an out-of-range
-       read rather than a wrong string. */
-    HMENU menu = CreatePopupMenu();
-    POINT pt;
-    int i, chosen, count;
-    if (!menu) return;
+    HMENU menu;
+    int i, count;
+    if (!s_list) return NULL;
+    menu = CreatePopupMenu();
+    if (!menu) return NULL;
     count = Header_GetItemCount(ListView_GetHeader(s_list));
     for (i = 1; i < count; ++i) {
         WCHAR label[64] = {0};
@@ -1479,6 +1483,19 @@ static void ProcColumns(HWND owner)
             (ListView_GetColumnWidth(s_list, i) ? MF_CHECKED : 0)),
             (UINT_PTR)(IDM_PROC_COL_FIRST + i), label);
     }
+    return menu;
+}
+
+/* Test-only introspection: the fixture cannot reach the popup through
+   ProcColumns, which blocks in TrackPopupMenu. */
+HMENU ProcTest_BuildColumnMenu(void) { return ProcBuildColumnMenu(); }
+
+static void ProcColumns(HWND owner)
+{
+    HMENU menu = ProcBuildColumnMenu();
+    POINT pt;
+    int chosen;
+    if (!menu) return;
     GetCursorPos(&pt);
     chosen = (int)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
                                  pt.x, pt.y, 0, owner, NULL)
