@@ -610,16 +610,28 @@ void UI_UpdateDashboard(HWND dashboard)
 
 void UI_DrawNavigation(HWND tabs, HDC dc)
 {
-    static const WCHAR *names[] = {L"Applications", L"Processes", L"Services", L"Performance", L"Networking", L"Users"};
-    RECT rc; int i, selected = TabCtrl_GetCurSel(tabs);
+    /* The labels come from the tab control's own items, which CreatePages
+       sets from TabPage::title. A local copy of the names here would drift
+       the moment a tab is added, renamed or reordered -- and being indexed
+       by TAB_COUNT, drift would mean an out-of-bounds read, not a wrong
+       string. Count from the control too, so a page that failed to create
+       is skipped rather than painted as a blank card. */
+    RECT rc; int i, count = TabCtrl_GetItemCount(tabs);
+    int selected = TabCtrl_GetCurSel(tabs);
     GetClientRect(tabs, &rc); UI_Fill(dc, &rc, UI_BG);
-    for (i = 0; i < TAB_COUNT; ++i) {
-        RECT item, label; WCHAR text[64];
+    for (i = 0; i < count; ++i) {
+        RECT item, label; WCHAR text[64], name[48];
+        TCITEMW query;
+        ZeroMemory(&query, sizeof(query));
+        query.mask = TCIF_TEXT;
+        query.pszText = name;
+        query.cchTextMax = ARRAYSIZE(name);
+        if (!TabCtrl_GetItem(tabs, i, &query)) name[0] = L'\0';
         TabCtrl_GetItemRect(tabs, i, &item);
         item.top = DPX(3); item.bottom = rc.bottom - DPX(2);
         if (i == selected) UI_Card(dc, &item, UI_SURFACE, UI_LINE);
         label = item; label.left += DPX(10); label.right -= DPX(10);
-        StringCchPrintfW(text, ARRAYSIZE(text), L"%02d   %s", i + 1, names[i]);
+        StringCchPrintfW(text, ARRAYSIZE(text), L"%02d   %s", i + 1, name);
         UI_Text(dc, text, label, 1, i == selected ? UI_BLUE : UI_MUTED,
             DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
         if (i == selected) {

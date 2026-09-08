@@ -214,6 +214,29 @@ int main(void)
     SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_REFRESH, 0); Pump(250);
     CHECK(SysInfo_Lock()->sequence > sequence); SysInfo_Unlock();
     SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_TOGGLEPAUSE, 0); CHECK(g_cfg.updateSpeed == SPEED_NORMAL);
+    /* The nav bar used to keep its own copy of the tab names, indexed by
+       TAB_COUNT. Assert the tab control is the single source, and drive a
+       real paint so an out-of-bounds label read would fault here. */
+    for (i = 0; i < TAB_COUNT; ++i) {
+        WCHAR label[64];
+        TCITEMW tab;
+        ZeroMemory(&tab, sizeof(tab));
+        tab.mask = TCIF_TEXT;
+        tab.pszText = label;
+        tab.cchTextMax = ARRAYSIZE(label);
+        CHECK(TabCtrl_GetItem(App_TabControl(), i, &tab));
+        CHECK(lstrcmpW(label, g_page[i]->title) == 0);
+    }
+    CHECK(TabCtrl_GetItemCount(App_TabControl()) == TAB_COUNT);
+    {
+        HDC screen = GetDC(NULL);
+        HDC memory = CreateCompatibleDC(screen);
+        HBITMAP bitmap = CreateCompatibleBitmap(screen, 1180, 64);
+        HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
+        UI_DrawNavigation(App_TabControl(), memory);
+        SelectObject(memory, oldBitmap);
+        DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(NULL, screen);
+    }
     for (i = 0; i < TAB_COUNT; ++i) {
         SwitchToTab(i, FALSE); Pump(120);
         CHECK(IsWindowVisible(g_page[i]->hwnd));
