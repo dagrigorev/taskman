@@ -273,6 +273,29 @@ int main(void)
                             "the Sensors list cannot be exercised\n");
         }
     }
+    {
+        /* The temperature list is populated by the collector rather than by
+           the tab, so it is checked against the model the same way. When
+           unelevated the ACPI explanatory row is always appended, so the
+           list is never completely empty on an ordinary run. */
+        HWND temps = GetDlgItem(TabSensors()->hwnd, IDC_SENS_TEMPLIST);
+        const SensorReading *model;
+        int drives = 0;
+        CHECK(temps != NULL);
+        CheckBounds(temps, TabSensors()->hwnd);
+        model = Sensors_Lock(&drives); (void)model; Sensors_Unlock();
+        if (drives > 0) {
+            WCHAR name[128] = {0};
+            ListView_GetItemText(temps, 0, 0, name, ARRAYSIZE(name));
+            CHECK(name[0] != L'\0');
+            fprintf(stderr, "workspace: %d temperature source(s), first = %ls\n",
+                    drives, name);
+        }
+        if (!Sensors_IsElevated())
+            CHECK(ListView_GetItemCount(temps) == drives + 1);
+        else
+            CHECK(ListView_GetItemCount(temps) >= drives);
+    }
     Capture(hwnd, L"tests/.build/workspace-sensors.bmp");
     SwitchToTab(TAB_PROCESSES, FALSE); Pump(60);
     CHECK(!Gpu_IsEnabled());

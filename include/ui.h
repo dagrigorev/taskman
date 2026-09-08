@@ -11,6 +11,11 @@
 #define UI_VIOLET   RGB(126, 83, 222)
 #define UI_TEAL     RGB(15, 153, 137)
 #define UI_NAVY     RGB(20, 32, 55)
+/* Threshold shading for the Sensors tab. Tinted backgrounds rather than
+   coloured text, so a hot row reads at a glance without the number
+   becoming hard to read against it. */
+#define UI_WARN     RGB(255, 241, 217)
+#define UI_CRIT     RGB(255, 218, 218)
 
 void UI_ThemeInit(void);
 void UI_ThemeDestroy(void);

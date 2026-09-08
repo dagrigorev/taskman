@@ -85,6 +85,7 @@
 /* Sensors tab (2600-2699) */
 #define IDC_SENS_GRAPHHOST              2600
 #define IDC_SENS_LIST                   2601
+#define IDC_SENS_TEMPLIST               2602
 
 /* ------------------------------------------------------ menu commands --- */
 #define IDM_FILE_NEWTASK                40001

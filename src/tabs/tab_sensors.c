@@ -4,9 +4,10 @@
 #include "app.h"
 #include "ui.h"
 #include "gpu.h"
+#include "sensors.h"
 #include <stdlib.h>
 
-static HWND s_graphHost, s_list;
+static HWND s_graphHost, s_list, s_temps;
 
 /* ----------------------------------------------------------------- model -- */
 
@@ -15,6 +16,10 @@ static int s_viewCount;
 static ULONGLONG s_selected;
 static int s_column, s_direction = 1;
 static BOOL s_refreshing;
+
+static SensorReading s_tempView[SENSORS_MAX];
+static int s_tempCount;
+static BOOL s_elevated;
 
 static int sens_compare(const void *left, const void *right)
 {
@@ -89,40 +94,51 @@ static void SensCreate(TabPage *p)
         UI_AddColumn(s_list, 2, L"Dedicated Used",     72, LVCFMT_RIGHT);
         UI_AddColumn(s_list, 3, L"Dedicated Total",    72, LVCFMT_RIGHT);
     }
+
+    s_temps = UI_CreateListView(p->hwnd, IDC_SENS_TEMPLIST, 0);
+    if (s_temps) {
+        UI_AddColumn(s_temps, 0, L"Sensor",       140, LVCFMT_LEFT);
+        UI_AddColumn(s_temps, 1, L"Temperature",   72, LVCFMT_RIGHT);
+        UI_AddColumn(s_temps, 2, L"Warning",       60, LVCFMT_RIGHT);
+        UI_AddColumn(s_temps, 3, L"Critical",      60, LVCFMT_RIGHT);
+        UI_AddColumn(s_temps, 4, L"Status",       110, LVCFMT_LEFT);
+    }
 }
 
 static void SensLayout(TabPage *p, int cx, int cy, BOOL tiny)
 {
     int margin = UI_Margin(p->hwnd);
-    int graphH;
+    int width = cx - 2 * margin > 0 ? cx - 2 * margin : 1;
+    int graphH, listH, y;
 
     /* Tiny footprint keeps the graph only, matching Performance and
        Networking. */
     if (tiny) {
-        if (s_list) ShowWindow(s_list, SW_HIDE);
+        if (s_list)  ShowWindow(s_list,  SW_HIDE);
+        if (s_temps) ShowWindow(s_temps, SW_HIDE);
         if (s_graphHost) {
             ShowWindow(s_graphHost, SW_SHOW);
             MoveWindow(s_graphHost, 0, 0, cx, cy, TRUE);
         }
         return;
     }
-    if (s_list) ShowWindow(s_list, SW_SHOW);
+    if (s_list)  ShowWindow(s_list,  SW_SHOW);
+    if (s_temps) ShowWindow(s_temps, SW_SHOW);
 
-    graphH = (cy - 3 * margin) * 2 / 3;
+    /* Four margins now: above the graph, and between each pair. */
+    graphH = (cy - 4 * margin) / 2;
     if (graphH < DPX(60)) graphH = DPX(60);
-    if (graphH > cy - 3 * margin - DPX(60)) {
-        graphH = cy - 3 * margin - DPX(60);
-        if (graphH < DPX(40)) graphH = DPX(40);
-    }
+    listH = (cy - 4 * margin - graphH) / 2;
+    if (listH < DPX(48)) listH = DPX(48);
 
-    if (s_graphHost)
-        MoveWindow(s_graphHost, margin, margin,
-                   cx - 2 * margin > 0 ? cx - 2 * margin : 1, graphH, TRUE);
-    if (s_list)
-        MoveWindow(s_list, margin, margin + graphH + margin,
-                   cx - 2 * margin > 0 ? cx - 2 * margin : 1,
-                   cy - margin - (margin + graphH + margin) > 0
-                       ? cy - margin - (margin + graphH + margin) : 1, TRUE);
+    y = margin;
+    if (s_graphHost) MoveWindow(s_graphHost, margin, y, width, graphH, TRUE);
+    y += graphH + margin;
+    if (s_list)      MoveWindow(s_list,      margin, y, width, listH, TRUE);
+    y += listH + margin;
+    if (s_temps)
+        MoveWindow(s_temps, margin, y, width,
+                   cy - margin - y > 0 ? cy - margin - y : 1, TRUE);
 }
 
 static void SensSnapshot(TabPage *p)
@@ -179,10 +195,90 @@ static void SensSnapshot(TabPage *p)
     SendMessageW(s_list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(s_list, NULL, TRUE);
     s_refreshing = FALSE;
+
+    if (s_temps) {
+        const SensorReading *published;
+        int temps = 0, row;
+
+        published = Sensors_Lock(&temps);
+        if (temps > SENSORS_MAX) temps = SENSORS_MAX;
+        if (temps > 0) CopyMemory(s_tempView, published,
+                                  (size_t)temps * sizeof(*s_tempView));
+        Sensors_Unlock();
+        s_tempCount = temps;
+        s_elevated = Sensors_IsElevated();
+
+        s_refreshing = TRUE;
+        SendMessageW(s_temps, WM_SETREDRAW, FALSE, 0);
+        ListView_DeleteAllItems(s_temps);
+        for (row = 0; row < temps; ++row) {
+            WCHAR value[32], warn[32], crit[32], status[64];
+            LVITEMW item = {0};
+            const SensorReading *r = &s_tempView[row];
+            StringCchPrintfW(value, ARRAYSIZE(value), L"%d \x00B0" L"C", r->celsius);
+            if (r->thresholdsKnown) {
+                StringCchPrintfW(warn, ARRAYSIZE(warn), L"%d \x00B0" L"C", r->warning);
+                StringCchPrintfW(crit, ARRAYSIZE(crit), L"%d \x00B0" L"C", r->critical);
+                StringCchPrintfW(status, ARRAYSIZE(status), L"%s (%d sensor%s)",
+                    r->celsius >= r->critical ? L"Critical" :
+                    r->celsius >= r->warning  ? L"Warning"  : L"Normal",
+                    r->sensorCount, r->sensorCount == 1 ? L"" : L"s");
+            } else {
+                lstrcpyW(warn, L"Unknown"); lstrcpyW(crit, L"Unknown");
+                StringCchPrintfW(status, ARRAYSIZE(status),
+                    L"%d sensor%s, no thresholds reported",
+                    r->sensorCount, r->sensorCount == 1 ? L"" : L"s");
+            }
+            item.mask = LVIF_TEXT; item.iItem = row;
+            item.pszText = UI_Str(r->name);
+            ListView_InsertItem(s_temps, &item);
+            ListView_SetItemText(s_temps, row, 1, value);
+            ListView_SetItemText(s_temps, row, 2, warn);
+            ListView_SetItemText(s_temps, row, 3, crit);
+            ListView_SetItemText(s_temps, row, 4, status);
+        }
+        if (!s_elevated) {
+            /* Explained, not hidden: a silently absent feature reads as a
+               bug. The row sits after the drives, which do work. */
+            LVITEMW item = {0};
+            item.mask = LVIF_TEXT; item.iItem = temps;
+            item.pszText = UI_Str(L"CPU thermal zones");
+            ListView_InsertItem(s_temps, &item);
+            ListView_SetItemText(s_temps, temps, 4,
+                UI_Str(L"Requires administrator"));
+        }
+        SendMessageW(s_temps, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(s_temps, NULL, TRUE);
+        s_refreshing = FALSE;
+    }
 }
 
 static BOOL sens_notify(TabPage *p, NMHDR *nm, LRESULT *result)
 {
+    /* Before the s_list guard below, which would reject every notification
+       the temperature list sends. */
+    if (nm->hwndFrom == s_temps && nm->code == NM_CUSTOMDRAW) {
+        NMLVCUSTOMDRAW *draw = (NMLVCUSTOMDRAW *)nm;
+        if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+            *result = CDRF_NOTIFYITEMDRAW; return TRUE;
+        }
+        if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+            int index = (int)draw->nmcd.dwItemSpec;
+            COLORREF bg = index % 2 ? RGB(248, 250, 253) : UI_SURFACE;
+            /* Thresholds come from the device, never from constants: an
+               NVMe drive warns at 82 where a spinning disk may warn at 50,
+               and a drive that reported no usable pair is left unshaded
+               rather than coloured on a guess. */
+            if (index >= 0 && index < s_tempCount &&
+                s_tempView[index].thresholdsKnown) {
+                const SensorReading *r = &s_tempView[index];
+                if (r->celsius >= r->critical)     bg = UI_CRIT;
+                else if (r->celsius >= r->warning) bg = UI_WARN;
+            }
+            draw->clrText = UI_INK; draw->clrTextBk = bg;
+            *result = CDRF_NEWFONT; return TRUE;
+        }
+    }
     if (nm->hwndFrom != s_list || s_refreshing) return FALSE;
     if (nm->code == LVN_COLUMNCLICK) {
         int column = ((NMLISTVIEW *)nm)->iSubItem;
@@ -222,6 +318,7 @@ static void SensDestroy(TabPage *p)
     (void)p;
     s_graphHost = NULL;
     s_list = NULL;
+    s_temps = NULL;
 }
 
 static TabPage s_page = {
