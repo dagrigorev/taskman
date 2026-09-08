@@ -219,6 +219,42 @@ static void TestCollectThrottles(void)
     CHECK(second == 0);            /* Reset clears the published model */
 }
 
+static int s_cancelAfter;
+static int s_cancelCalls;
+static BOOL TestCancel(void)
+{
+    return ++s_cancelCalls > s_cancelAfter;
+}
+
+static void TestDriveScanStopsWhenCancelled(void)
+{
+    /* SysInfo_Stop waits INFINITE for the collector thread, so a drive
+       that is slow to answer would hold up application exit for as long as
+       it takes -- multiplied by however many drives are left to probe.
+       The scan asks before each drive whether it should still be running. */
+    SensorReading drives[SENSORS_MAX];
+    int n;
+
+    s_cancelAfter = 0; s_cancelCalls = 0;
+    Sensors_SetCancelCheck(TestCancel);
+    n = Sensors_ReadDrives(drives, SENSORS_MAX);
+    CHECK(n == 0);                  /* cancelled before the first drive */
+    CHECK(s_cancelCalls == 1);      /* and asked exactly once */
+
+    /* Without a cancel hook the scan runs to completion, which is what
+       every production path other than shutdown does. */
+    Sensors_SetCancelCheck(NULL);
+    n = Sensors_ReadDrives(drives, SENSORS_MAX);
+    CHECK(n >= 0);
+
+    /* Cancelling partway keeps what was already collected rather than
+       discarding it: a partial model beats none. */
+    s_cancelAfter = 40; s_cancelCalls = 0;   /* past the 32 drive slots */
+    Sensors_SetCancelCheck(TestCancel);
+    CHECK(Sensors_ReadDrives(drives, SENSORS_MAX) == n);
+    Sensors_SetCancelCheck(NULL);
+}
+
 static void TestThreadDetachIsSafeWithoutAnApartment(void)
 {
     /* Every unelevated run reaches thread exit having never entered a COM
@@ -254,6 +290,7 @@ int main(void)
     TestRejectsWhenNoSensorIsUsable();
     TestImplausibleThresholdsAreUnknown();
     TestCollectThrottles();
+    TestDriveScanStopsWhenCancelled();
     TestThreadDetachIsSafeWithoutAnApartment();
     printf("sensors: %d failures\n", failures);
     return failures ? 1 : 0;

@@ -39,6 +39,15 @@ BOOL Sensors_ParseTemperature(const void *buffer, DWORD returned,
    silently -- an absent drive is not an error. Returns the count. */
 int Sensors_ReadDrives(SensorReading *out, int max);
 
+/* Installs a predicate the drive scan consults before each drive; returning
+   TRUE abandons the rest of the scan and keeps what was already collected.
+   Shutdown joins the collector thread with an infinite wait, so a drive
+   that is slow to answer would hold up application exit. Passed as a hook
+   rather than calling SysInfo_Stopping directly so this module stays
+   linkable into a headless suite on its own, as its elevation query is.
+   NULL, the default, means the scan always runs to completion. */
+void Sensors_SetCancelCheck(BOOL (*cancelled)(void));
+
 /* Queries root\WMI for ACPI thermal zones. Returns 0 immediately when the
    process is not elevated: MSAcpi_ThermalZoneTemperature is Access Denied
    without administrator, so attempting it would be a guaranteed failure

@@ -401,6 +401,10 @@ BOOL SysInfo_Start(HWND notify)
     g_sequence = 1;
     g_snap[0].sequence = g_sequence;
 
+    /* Lets a drive scan already in flight abandon the remaining devices
+       once SysInfo_Stop has signalled: the join below is an infinite wait. */
+    Sensors_SetCancelCheck(SysInfo_Stopping);
+
     g_thread = CreateThread(NULL, 0, CollectorProc, NULL, 0, NULL);
     if (!g_thread) {
         SysInfo_Stop();

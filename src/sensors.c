@@ -20,6 +20,13 @@
 
 #define SENSORS_MAX_PHYSICAL_DRIVES 32
 
+static BOOL (*s_cancelled)(void);
+
+void Sensors_SetCancelCheck(BOOL (*cancelled)(void))
+{
+    s_cancelled = cancelled;
+}
+
 static BOOL SensorPlausible(int celsius)
 {
     return celsius >= SENSOR_TEMP_MIN && celsius <= SENSOR_TEMP_MAX;
@@ -146,6 +153,10 @@ int Sensors_ReadDrives(SensorReading *out, int max)
     if (!out || max <= 0) return 0;
     for (index = 0; index < SENSORS_MAX_PHYSICAL_DRIVES && count < max; ++index) {
         WCHAR path[64];
+        /* Asked before each drive rather than only at the top: the cost
+           being guarded against is a single unresponsive device, and the
+           remaining ones should not be probed once shutdown has begun. */
+        if (s_cancelled && s_cancelled()) break;
         HANDLE drive;
         SensorReading reading;
         StringCchPrintfW(path, ARRAYSIZE(path), L"\\\\.\\PhysicalDrive%d", index);
