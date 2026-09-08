@@ -45,6 +45,7 @@ enum {
     TAB_PERFORMANCE,
     TAB_NETWORKING,
     TAB_USERS,
+    TAB_SENSORS,
     TAB_COUNT
 };
 
@@ -164,6 +165,7 @@ TabPage *TabServices(void);
 TabPage *TabPerformance(void);
 TabPage *TabNetworking(void);
 TabPage *TabUsers(void);
+TabPage *TabSensors(void);
 
 void Proc_Collect(void);
 void Proc_Reset(void);

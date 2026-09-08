@@ -82,6 +82,10 @@
 #define IDC_USERS_LOGOFF                2502
 #define IDC_USERS_SENDMSG               2503
 
+/* Sensors tab (2600-2699) */
+#define IDC_SENS_GRAPHHOST              2600
+#define IDC_SENS_LIST                   2601
+
 /* ------------------------------------------------------ menu commands --- */
 #define IDM_FILE_NEWTASK                40001
 #define IDM_FILE_EXIT                   40002

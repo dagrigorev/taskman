@@ -630,8 +630,12 @@ void UI_DrawNavigation(HWND tabs, HDC dc)
         TabCtrl_GetItemRect(tabs, i, &item);
         item.top = DPX(3); item.bottom = rc.bottom - DPX(2);
         if (i == selected) UI_Card(dc, &item, UI_SURFACE, UI_LINE);
-        label = item; label.left += DPX(10); label.right -= DPX(10);
-        StringCchPrintfW(text, ARRAYSIZE(text), L"%02d   %s", i + 1, name);
+        /* Seven labels divide the strip into 112 px at the minimum window
+           width, so the padding and the gap after the number are as tight as
+           they can be while still reading as two fields. Widen either and
+           "Applications" ellipsises at 100 % DPI. */
+        label = item; label.left += DPX(4); label.right -= DPX(4);
+        StringCchPrintfW(text, ARRAYSIZE(text), L"%02d  %s", i + 1, name);
         UI_Text(dc, text, label, 1, i == selected ? UI_BLUE : UI_MUTED,
             DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
         if (i == selected) {

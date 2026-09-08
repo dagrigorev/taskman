@@ -1029,6 +1029,9 @@ static void TabCollect(int tab)
     case TAB_SERVICES:   Svc_Collect();   break;
     case TAB_USERS:      Users_Collect(); break;
     case TAB_NETWORKING: Net_Collect();   break;
+    /* TAB_SENSORS has no tab collector: sysinfo.c calls Gpu_Collect on the
+       collector thread ahead of this router, so the model is already
+       current by the time the page reads it. */
     default: break;
     }
 }
@@ -1077,6 +1080,7 @@ static void CreatePages(HWND parent)
     g_page[TAB_PERFORMANCE] = TabPerformance();
     g_page[TAB_NETWORKING]  = TabNetworking();
     g_page[TAB_USERS]       = TabUsers();
+    g_page[TAB_SENSORS]     = TabSensors();
 
     for (i = 0; i < TAB_COUNT; i++) {
         TCITEMW item;

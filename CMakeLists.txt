@@ -55,6 +55,7 @@ set(TASKMAN_PAGE_SOURCES
     src/tabs/tab_perf.c
     src/tabs/tab_network.c
     src/tabs/tab_users.c
+    src/tabs/tab_sensors.c
     src/tabs/proc_tree.c)
 set(TASKMAN_SUPPORT_SOURCES src/ui.c src/settings.c src/sysinfo.c src/gpu.c)
 set(TASKMAN_RESOURCE "${PROJECT_SOURCE_DIR}/res/resource.rc")
