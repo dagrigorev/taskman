@@ -480,6 +480,26 @@ void Gpu_Collect(ULONGLONG nowTick)
     GpuPublish(samples, sampleCount, info, infoCount);
 }
 
+int Gpu_History(const GpuAdapter *adapter, float *out, int max)
+{
+    int used, first, i;
+
+    if (!adapter || !out || max <= 0) return 0;
+    used = adapter->count;
+    if (used > GPU_HISTORY) used = GPU_HISTORY;
+    if (used <= 0) return 0;
+    if (used > max) used = max;
+
+    /* head is one past the newest sample, so the run of 'used' newest
+       samples ends just before head and starts 'used' places earlier.
+       GPU_HISTORY is added before the modulo because head - used is
+       negative whenever the wanted run crosses the buffer start. */
+    first = (adapter->head - used + GPU_HISTORY) % GPU_HISTORY;
+    for (i = 0; i < used; ++i)
+        out[i] = adapter->history[(first + i) % GPU_HISTORY];
+    return used;
+}
+
 const GpuAdapter *Gpu_Lock(int *count)
 {
     AcquireSRWLockShared(&s_lock);

@@ -326,6 +326,49 @@ static void TestProcessUsageUnknownPid(void)
     CHECK(value == 123.0);       /* untouched on a miss */
 }
 
+static void TestHistoryUnwrapsOldestFirst(void)
+{
+    GpuAdapter adapter;
+    float out[GPU_HISTORY];
+    int i, n;
+
+    ZeroMemory(&adapter, sizeof(adapter));
+
+    /* Empty ring yields nothing rather than a run of confident zeroes. */
+    CHECK(Gpu_History(&adapter, out, GPU_HISTORY) == 0);
+
+    /* Partially filled, not yet wrapped: three samples, in order. */
+    adapter.history[0] = 10.0f; adapter.history[1] = 20.0f;
+    adapter.history[2] = 30.0f;
+    adapter.head = 3; adapter.count = 3;
+    n = Gpu_History(&adapter, out, GPU_HISTORY);
+    CHECK(n == 3);
+    CHECK(out[0] == 10.0f && out[1] == 20.0f && out[2] == 30.0f);
+
+    /* Full and wrapped: head points at the OLDEST sample, so the output
+       must start there and run through the end of the buffer before
+       coming back to index 0. A ring bug shows up here as a phase shift. */
+    for (i = 0; i < GPU_HISTORY; ++i) adapter.history[i] = (float)i;
+    adapter.head = 5; adapter.count = GPU_HISTORY;
+    n = Gpu_History(&adapter, out, GPU_HISTORY);
+    CHECK(n == GPU_HISTORY);
+    CHECK(out[0] == 5.0f);
+    CHECK(out[GPU_HISTORY - 6] == (float)(GPU_HISTORY - 1));
+    CHECK(out[GPU_HISTORY - 5] == 0.0f);
+    CHECK(out[GPU_HISTORY - 1] == 4.0f);
+
+    /* A caller with a smaller buffer gets the NEWEST samples, not the
+       oldest: a graph that can show 40 points should show the last 40. */
+    n = Gpu_History(&adapter, out, 4);
+    CHECK(n == 4);
+    CHECK(out[0] == 1.0f && out[1] == 2.0f && out[2] == 3.0f && out[3] == 4.0f);
+
+    /* Defensive arguments. */
+    CHECK(Gpu_History(NULL, out, GPU_HISTORY) == 0);
+    CHECK(Gpu_History(&adapter, NULL, GPU_HISTORY) == 0);
+    CHECK(Gpu_History(&adapter, out, 0) == 0);
+}
+
 int main(void)
 {
     CHECK(GPU_ENGINE_KINDS == 7);
@@ -348,6 +391,7 @@ int main(void)
     TestEnabledFlag();
     TestCollectSkippedWhenDisabled();
     TestProcessUsageUnknownPid();
+    TestHistoryUnwrapsOldestFirst();
     printf("gpu: %d failures\n", failures);
     return failures ? 1 : 0;
 }

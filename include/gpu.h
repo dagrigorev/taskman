@@ -155,6 +155,12 @@ void Gpu_Collect(ULONGLONG nowTick);
 
 /* Shared read lock over the published model. Always returns a valid
    pointer; *count may be 0. */
+/* Copies an adapter's ring into a flat oldest-first array, as UI_Chart
+   expects. When 'max' is smaller than the ring the NEWEST 'max' samples are
+   returned -- a short graph should show recent history, not ancient history.
+   Returns the number of samples written. */
+int Gpu_History(const GpuAdapter *adapter, float *out, int max);
+
 const GpuAdapter *Gpu_Lock(int *count);
 void Gpu_Unlock(void);
 
