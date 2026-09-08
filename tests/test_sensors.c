@@ -255,6 +255,40 @@ static void TestDriveScanStopsWhenCancelled(void)
     Sensors_SetCancelCheck(NULL);
 }
 
+static void TestZoneKelvinConversion(void)
+{
+    /* ACPI reports tenths of a kelvin. The COM plumbing around this cannot
+       run without elevation, but the arithmetic can -- and it is the part
+       that produces a wrong number rather than no number. */
+    int celsius = 0;
+
+    /* 300.0 K is 26.85 C. Truncating gives 26; the reading is rounded. */
+    CHECK(Sensors_ZoneCelsius(3000, &celsius));
+    CHECK(celsius == 27);
+
+    /* Exactly zero Celsius, and either side of it: truncation rounds
+       towards zero, which is the wrong direction below freezing. */
+    CHECK(Sensors_ZoneCelsius(2731, &celsius));      /* -0.05 C */
+    CHECK(celsius == 0);
+    CHECK(Sensors_ZoneCelsius(2695, &celsius));      /* -3.65 C */
+    CHECK(celsius == -4);
+
+    /* A typical CPU zone. */
+    CHECK(Sensors_ZoneCelsius(3231, &celsius));      /* 49.95 C */
+    CHECK(celsius == 50);
+
+    /* Rejections: absolute zero, a BIOS reporting nothing, and values far
+       outside anything a thermal zone can mean. All must be refused rather
+       than shown, and must leave the caller's value alone. */
+    celsius = 1234;
+    CHECK(!Sensors_ZoneCelsius(0, &celsius));        /* -273.15 C */
+    CHECK(celsius == 1234);
+    CHECK(!Sensors_ZoneCelsius(-500, &celsius));     /* below absolute zero */
+    CHECK(!Sensors_ZoneCelsius(9999999, &celsius));  /* implausibly hot */
+    CHECK(celsius == 1234);
+    CHECK(!Sensors_ZoneCelsius(3000, NULL));
+}
+
 static void TestThreadDetachIsSafeWithoutAnApartment(void)
 {
     /* Every unelevated run reaches thread exit having never entered a COM
@@ -291,6 +325,7 @@ int main(void)
     TestImplausibleThresholdsAreUnknown();
     TestCollectThrottles();
     TestDriveScanStopsWhenCancelled();
+    TestZoneKelvinConversion();
     TestThreadDetachIsSafeWithoutAnApartment();
     printf("sensors: %d failures\n", failures);
     return failures ? 1 : 0;

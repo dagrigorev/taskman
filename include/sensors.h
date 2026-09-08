@@ -48,6 +48,15 @@ int Sensors_ReadDrives(SensorReading *out, int max);
    NULL, the default, means the scan always runs to completion. */
 void Sensors_SetCancelCheck(BOOL (*cancelled)(void));
 
+/* Converts an ACPI CurrentTemperature -- tenths of a kelvin -- into whole
+   degrees Celsius, rounded rather than truncated, and range-checked.
+   Returns FALSE and leaves *out alone for anything outside a plausible
+   thermal-zone reading, which includes the zero some firmware reports for
+   a zone it does not actually implement. Separated from the WMI query so
+   the arithmetic is testable without elevation, since the query is Access
+   Denied for an ordinary user. */
+BOOL Sensors_ZoneCelsius(LONG tenthsKelvin, int *out);
+
 /* Queries root\WMI for ACPI thermal zones. Returns 0 immediately when the
    process is not elevated: MSAcpi_ThermalZoneTemperature is Access Denied
    without administrator, so attempting it would be a guaranteed failure

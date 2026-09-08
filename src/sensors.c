@@ -197,6 +197,19 @@ static BOOL SensorComInit(void)
     return TRUE;
 }
 
+BOOL Sensors_ZoneCelsius(LONG tenthsKelvin, int *out)
+{
+    /* Rounded, not truncated: 3000 tenths of a kelvin is 26.85 C, which a
+       cast to int would report as 26, and truncation rounds towards zero,
+       which is the wrong direction for anything below freezing. */
+    double celsius = (double)tenthsKelvin / 10.0 - 273.15;
+    int rounded = (int)(celsius < 0 ? celsius - 0.5 : celsius + 0.5);
+    if (!out) return FALSE;
+    if (!SensorPlausible(rounded)) return FALSE;
+    *out = rounded;
+    return TRUE;
+}
+
 int Sensors_ReadZones(SensorReading *out, int max)
 {
     IWbemLocator  *locator = NULL;
@@ -249,9 +262,8 @@ int Sensors_ReadZones(SensorReading *out, int max)
         if (SUCCEEDED(IWbemClassObject_Get(row, L"CurrentTemperature", 0,
                                            &value, NULL, NULL)) &&
             value.vt == VT_I4) {
-            /* Tenths of a kelvin. */
-            int celsius = (int)((double)value.lVal / 10.0 - 273.15);
-            if (SensorPlausible(celsius)) {
+            int celsius = 0;
+            if (Sensors_ZoneCelsius(value.lVal, &celsius)) {
                 SensorReading *reading = &out[count];
                 VARIANT name;
                 ZeroMemory(reading, sizeof(*reading));
