@@ -35,7 +35,10 @@ target_link_libraries(taskman_platform INTERFACE
     iphlpapi wtsapi32 version advapi32 gdi32 user32 kernel32 pdh dxgi
     # dxguid supplies IID_IDXGIFactory1. MinGW's libdxgi.a already carries
     # the interface GUIDs; the MSVC import library does not.
-    dxguid)
+    dxguid
+    # wbemuuid supplies CLSID_WbemLocator and IID_IWbemLocator for the ACPI
+    # thermal zone query, the same way dxguid supplies the DXGI GUIDs.
+    wbemuuid)
 if(MSVC)
     target_include_directories(taskman_platform INTERFACE
         "$<$<COMPILE_LANGUAGE:RC>:${PROJECT_SOURCE_DIR}/res>")

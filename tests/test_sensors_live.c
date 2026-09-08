@@ -36,6 +36,26 @@ int main(void)
                drives[i].warning, drives[i].critical,
                drives[i].thresholdsKnown ? "" : ", thresholds unknown");
     }
+    {
+        /* Unelevated this must be a clean, fast zero rather than an error
+           or a hang -- that is the case almost every user is in. */
+        SensorReading zones[SENSORS_MAX];
+        int z = Sensors_ReadZones(zones, SENSORS_MAX);
+        CHECK(z >= 0);
+        if (!Sensors_IsElevated()) {
+            CHECK(z == 0);
+            printf("sensors_live: not elevated; ACPI zones correctly skipped\n");
+        } else {
+            int j;
+            for (j = 0; j < z; ++j) {
+                CHECK(zones[j].name[0] != L'\0');
+                CHECK(zones[j].celsius >= SENSOR_TEMP_MIN);
+                CHECK(zones[j].celsius <= SENSOR_TEMP_MAX);
+                printf("sensors_live: zone %ls = %d C\n",
+                       zones[j].name, zones[j].celsius);
+            }
+        }
+    }
     printf("sensors_live: %d failures (%d drives)\n", failures, n);
     return failures ? 1 : 0;
 }

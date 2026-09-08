@@ -39,6 +39,13 @@ BOOL Sensors_ParseTemperature(const void *buffer, DWORD returned,
    silently -- an absent drive is not an error. Returns the count. */
 int Sensors_ReadDrives(SensorReading *out, int max);
 
+/* Queries root\WMI for ACPI thermal zones. Returns 0 immediately when the
+   process is not elevated: MSAcpi_ThermalZoneTemperature is Access Denied
+   without administrator, so attempting it would be a guaranteed failure
+   every five seconds. Shares SensorReading with the drives so both can be
+   appended into one array. */
+int Sensors_ReadZones(SensorReading *out, int max);
+
 /* TRUE when the process is running elevated. Queried inside this module
    rather than through main.c's App_IsElevated so sensors.c stays linkable
    into a headless suite on its own, as gpu.c is. */

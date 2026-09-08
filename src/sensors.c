@@ -8,6 +8,11 @@
 #include "sensors.h"
 #include <winioctl.h>
 #include <strsafe.h>
+/* COBJMACROS is what lets C call the WMI interfaces, exactly as gpu.c does
+   for DXGI. */
+#define COBJMACROS
+#include <wbemidl.h>
+#include <objbase.h>
 
 /* Both MSVC's SDK and MinGW's headers declare StorageDeviceTemperatureProperty,
    STORAGE_TEMPERATURE_INFO and STORAGE_TEMPERATURE_DATA_DESCRIPTOR
@@ -157,6 +162,116 @@ int Sensors_ReadDrives(SensorReading *out, int max)
     return count;
 }
 
+/* ------------------------------------------------------------ ACPI zones -- */
+
+/* COM is initialised once, on the collector thread, and torn down from
+   Sensors_Reset -- which the host calls on that same thread during
+   shutdown, after SysInfo_Stop has joined it. Initialising per sample
+   would be both wasteful and wrong. This is multi-threaded apartment and
+   is deliberately distinct from the apartment-threaded initialisation
+   ProcOpenLocation performs on the UI thread; the two must not be
+   conflated. */
+static BOOL s_comReady;
+
+static BOOL SensorComInit(void)
+{
+    HRESULT hr;
+    if (s_comReady) return TRUE;
+    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    /* Another apartment model already on this thread is not something to
+       override: bail rather than fight the caller for it. */
+    if (hr == RPC_E_CHANGED_MODE) return FALSE;
+    if (FAILED(hr) && hr != S_FALSE) return FALSE;
+    s_comReady = TRUE;
+    return TRUE;
+}
+
+int Sensors_ReadZones(SensorReading *out, int max)
+{
+    IWbemLocator  *locator = NULL;
+    IWbemServices *services = NULL;
+    IEnumWbemClassObject *rows = NULL;
+    BSTR namespaceName = NULL, language = NULL, query = NULL;
+    int count = 0;
+
+    if (!out || max <= 0) return 0;
+    /* The query is Access Denied without administrator, so it is not even
+       attempted: a guaranteed failure per five seconds is pure cost. */
+    if (!Sensors_IsElevated()) return 0;
+    if (!SensorComInit()) return 0;
+
+    if (FAILED(CoCreateInstance(&CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER,
+                                &IID_IWbemLocator, (void **)&locator)) || !locator)
+        return 0;
+
+    namespaceName = SysAllocString(L"ROOT\\WMI");
+    language      = SysAllocString(L"WQL");
+    query         = SysAllocString(L"SELECT InstanceName, CurrentTemperature "
+                                  L"FROM MSAcpi_ThermalZoneTemperature");
+    if (!namespaceName || !language || !query) goto done;
+
+    if (FAILED(IWbemLocator_ConnectServer(locator, namespaceName, NULL, NULL,
+                                          NULL, 0, NULL, NULL, &services)) ||
+        !services)
+        goto done;
+    /* Without this the enumeration fails with E_ACCESSDENIED even elevated. */
+    if (FAILED(CoSetProxyBlanket((IUnknown *)services, RPC_C_AUTHN_WINNT,
+                                 RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL,
+                                 RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE)))
+        goto done;
+
+    if (FAILED(IWbemServices_ExecQuery(services, language, query,
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            NULL, &rows)) || !rows)
+        goto done;
+
+    while (count < max) {
+        IWbemClassObject *row = NULL;
+        ULONG returned = 0;
+        VARIANT value;
+
+        if (FAILED(IEnumWbemClassObject_Next(rows, 2000, 1, &row, &returned)) ||
+            returned == 0 || !row)
+            break;
+
+        VariantInit(&value);
+        if (SUCCEEDED(IWbemClassObject_Get(row, L"CurrentTemperature", 0,
+                                           &value, NULL, NULL)) &&
+            value.vt == VT_I4) {
+            /* Tenths of a kelvin. */
+            int celsius = (int)((double)value.lVal / 10.0 - 273.15);
+            if (SensorPlausible(celsius)) {
+                SensorReading *reading = &out[count];
+                VARIANT name;
+                ZeroMemory(reading, sizeof(*reading));
+                reading->celsius = celsius;
+                reading->sensorCount = 1;
+                reading->thresholdsKnown = FALSE;  /* ACPI reports none here */
+                VariantInit(&name);
+                if (SUCCEEDED(IWbemClassObject_Get(row, L"InstanceName", 0,
+                                                   &name, NULL, NULL)) &&
+                    name.vt == VT_BSTR && name.bstrVal)
+                    StringCchPrintfW(reading->name, SENSOR_NAME_MAX,
+                                     L"Thermal zone %s", name.bstrVal);
+                else
+                    StringCchPrintfW(reading->name, SENSOR_NAME_MAX,
+                                     L"Thermal zone %d", count);
+                VariantClear(&name);
+                ++count;
+            }
+        }
+        VariantClear(&value);
+        IWbemClassObject_Release(row);
+    }
+
+done:
+    if (rows)     IEnumWbemClassObject_Release(rows);
+    if (services) IWbemServices_Release(services);
+    if (locator)  IWbemLocator_Release(locator);
+    SysFreeString(query); SysFreeString(language); SysFreeString(namespaceName);
+    return count;
+}
+
 /* ------------------------------------------------------- published model -- */
 
 static SRWLOCK       s_lock = SRWLOCK_INIT;
@@ -193,6 +308,8 @@ void Sensors_Collect(ULONGLONG nowTick)
 
     ZeroMemory(readings, sizeof(readings));
     count = Sensors_ReadDrives(readings, SENSORS_MAX);
+    if (count < SENSORS_MAX)
+        count += Sensors_ReadZones(readings + count, SENSORS_MAX - count);
 
     AcquireSRWLockExclusive(&s_lock);
     CopyMemory(s_model, readings, sizeof(s_model));
@@ -221,4 +338,8 @@ void Sensors_Reset(void)
     s_modelCount = 0;
     ReleaseSRWLockExclusive(&s_lock);
     s_lastCollect = 0;
+    /* The host calls this on the collector's own thread during shutdown,
+       after SysInfo_Stop has joined it, so the apartment being torn down
+       is the one SensorComInit created. */
+    if (s_comReady) { CoUninitialize(); s_comReady = FALSE; }
 }
