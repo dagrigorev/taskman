@@ -200,6 +200,17 @@ static BOOL sens_notify(TabPage *p, NMHDR *nm, LRESULT *result)
     return FALSE;
 }
 
+/* Collection is gated on this tab so that a user who never opens it never
+   pays for the PDH query -- around a thousand engine instances on a machine
+   with three adapters. Unit 4's per-process GPU column will enable it
+   independently; when that lands, this must stop being the only owner of
+   the flag. */
+static void SensActivate(TabPage *p, BOOL active)
+{
+    (void)p;
+    Gpu_SetEnabled(active);
+}
+
 static HWND SensPrimary(TabPage *p)
 {
     (void)p;
@@ -216,7 +227,7 @@ static void SensDestroy(TabPage *p)
 static TabPage s_page = {
     L"Sensors", NULL, TAB_SENSORS,
     SensCreate, SensDestroy, SensLayout,
-    SensSnapshot, NULL, sens_notify, NULL, NULL, NULL,
+    SensSnapshot, NULL, sens_notify, SensActivate, NULL, NULL,
     NULL, NULL,
     SensPrimary
 };

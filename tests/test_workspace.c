@@ -214,6 +214,9 @@ int main(void)
     SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_REFRESH, 0); Pump(250);
     CHECK(SysInfo_Lock()->sequence > sequence); SysInfo_Unlock();
     SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_TOGGLEPAUSE, 0); CHECK(g_cfg.updateSpeed == SPEED_NORMAL);
+    /* Nothing has opened the Sensors tab, so the collector must not have
+       paid for a PDH query. */
+    CHECK(!Gpu_IsEnabled());
     /* The nav bar used to keep its own copy of the tab names, indexed by
        TAB_COUNT. Assert the tab control is the single source, and drive a
        real paint so an out-of-bounds label read would fault here. */
@@ -242,6 +245,37 @@ int main(void)
         CHECK(IsWindowVisible(g_page[i]->hwnd));
         CheckBounds(g_page[i]->hwnd, hwnd);
     }
+    /* Activating the tab turns collection on; leaving it turns it back off,
+       so an unopened tab costs nothing and a closed one stops costing. */
+    SwitchToTab(TAB_SENSORS, FALSE); Pump(120);
+    CHECK(Gpu_IsEnabled());
+    {
+        /* The first sample is discarded -- rate counters need two
+           collections -- and the interval is a second, so the list cannot
+           have populated yet. Wait past that and check the page actually
+           renders the model, rather than only that the gate opened. A
+           machine with no GPU counters at all is a supported case, so the
+           row count is checked against the model, not against a constant. */
+        const GpuAdapter *model;
+        int adapters = 0;
+        Pump(2600);
+        model = Gpu_Lock(&adapters); (void)model; Gpu_Unlock();
+        if (adapters > 0) {
+            HWND sensors = GetDlgItem(TabSensors()->hwnd, IDC_SENS_LIST);
+            WCHAR name[128] = {0};
+            CHECK(ListView_GetItemCount(sensors) == adapters);
+            ListView_GetItemText(sensors, 0, 0, name, ARRAYSIZE(name));
+            CHECK(name[0] != L'\0');
+            fprintf(stderr, "workspace: %d GPU adapter(s), first = %ls\n",
+                    adapters, name);
+        } else {
+            fprintf(stderr, "SKIP workspace: no GPU performance counters; "
+                            "the Sensors list cannot be exercised\n");
+        }
+    }
+    Capture(hwnd, L"tests/.build/workspace-sensors.bmp");
+    SwitchToTab(TAB_PROCESSES, FALSE); Pump(60);
+    CHECK(!Gpu_IsEnabled());
     SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
     Capture(hwnd, L"tests/.build/workspace-performance.bmp");
     SwitchToTab(TAB_PROCESSES, FALSE);
@@ -291,6 +325,6 @@ int main(void)
         CHECK(!(GetWindowLongW(GetDlgItem(page, IDC_PROC_DETAILS), GWL_STYLE) & WS_VISIBLE));
     }
     DestroyWindow(hwnd); Pump(10);
-    printf("workspace: %d failures; search, selection, pause, refresh, six tabs, resize, tiny mode and DPI\n", failures);
+    printf("workspace: %d failures; search, selection, pause, refresh, seven tabs, resize, tiny mode and DPI\n", failures);
     return failures ? 1 : 0;
 }

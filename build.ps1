@@ -8,7 +8,7 @@
         .\build.ps1                 release build -> build\taskman.exe
         .\build.ps1 rebuild         clean, then build
         .\build.ps1 debug           unoptimised build with symbols
-        .\build.ps1 test            build and run all ten CTest suites
+        .\build.ps1 test            build and run all twelve CTest suites
         .\build.ps1 run             build, then launch the executable
         .\build.ps1 clean           remove build\
 
