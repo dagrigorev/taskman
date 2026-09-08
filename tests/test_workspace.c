@@ -360,6 +360,53 @@ int main(void)
         CHECK(inspectorRect.top >= tableRect.bottom); /* Short windows need the bottom inspector. */
     }
     App_ShowProcess(GetCurrentProcessId());
+    {
+        /* Services -> "Go to Process" reaches a service running as SYSTEM
+           while the user filter is on, which every other test here misses
+           because they all set showAllUsers. The one-tick s_pendingPid
+           handoff is what exempts that row from the filter for the single
+           snapshot that reveals it; clearing it too eagerly would make the
+           command silently do nothing, which is how it would regress. */
+        BOOL savedAllUsers = g_cfg.showAllUsers;
+        g_cfg.showAllUsers = FALSE;
+        TabProcesses()->OnSnapshot(TabProcesses()); Pump(60);
+        CHECK(ListFindPid(list, 4) < 0);      /* System is filtered out */
+
+        App_ShowProcess(4);                    /* the Services tab's path */
+        Pump(120);
+        /* The exemption is consumed by the next snapshot rather than by the
+           command itself: App_ShowProcess only records the pending pid. */
+        TabProcesses()->OnSnapshot(TabProcesses()); Pump(60);
+        CHECK(ListFindPid(list, 4) >= 0);      /* exempted and revealed */
+        {
+            int shown = ListFindPid(list, 4);
+            if (shown >= 0) {
+                UINT state = (UINT)ListView_GetItemState(list, shown,
+                    LVIS_SELECTED | LVIS_FOCUSED);
+                CHECK(state == (LVIS_SELECTED | LVIS_FOCUSED));
+            }
+        }
+        /* The pending request is consumed once it has been honoured, so it
+           cannot exempt the pid forever. */
+        CHECK(ProcTest_PendingPid() == 0);
+
+        /* The row nonetheless stays while it is the selection: the filter
+           exempts the selected row too, so a process the user was just sent
+           to does not vanish from under them on the next refresh. */
+        TabProcesses()->OnSnapshot(TabProcesses()); Pump(60);
+        CHECK(ListFindPid(list, 4) >= 0);
+
+        /* Only once the selection moves elsewhere does the filter reclaim
+           it -- that is what bounds the exemption. */
+        ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED,
+                              LVIS_SELECTED | LVIS_FOCUSED);
+        TabProcesses()->OnSnapshot(TabProcesses()); Pump(60);
+        CHECK(ListFindPid(list, 4) < 0);
+
+        g_cfg.showAllUsers = savedAllUsers;
+        TabProcesses()->OnSnapshot(TabProcesses()); Pump(60);
+    }
     Capture(hwnd, L"tests/.build/workspace-short-wide.bmp");
     SetWindowPos(hwnd, NULL, 0, 0, 840, 720, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     LayoutMain(); Pump(60);
