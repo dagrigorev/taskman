@@ -309,7 +309,28 @@ int main(void)
         counts.started = counts.exited = counts.grew = 0;
         ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 0, L"12:03:44");
         CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: no changes"));
+        {
+            /* The inspector's "since mark" value. This fixture's
+               UI_FormatSize prints raw byte counts. */
+            ProcRow grown = marked[0];
+            grown.handles = 300;
+            grown.privateBytes += PROC_DIFF_GREW_BYTES;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"+16777216 private, +300 handles"));
+            grown.privateBytes = 1024;
+            grown.handles = 0;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"-10484736 private, +0 handles"));
+            grown.memoryKnown = FALSE;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"+0 handles"));
+            grown.createTime = 99;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"Started after the mark"));
+        }
         ProcDiff_Free(&s_mark);
+        ProcMarkDelta(&now, text, ARRAYSIZE(text));
+        CHECK(text[0] == 0);
         CHECK(!ProcMatches(&now, L"", 3));
     }
     {

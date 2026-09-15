@@ -790,6 +790,31 @@ static void ProcDetailLine(HDC dc, int x, int y, int width, const WCHAR *label, 
     UI_Text(dc, value, r, 1, UI_INK, DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+/* How the row moved since the mark, or an empty string with no mark. */
+static void ProcMarkDelta(const ProcRow *row, WCHAR *buf, size_t cch)
+{
+    LONGLONG mem;
+    LONG handles;
+    WCHAR size[48];
+    buf[0] = 0;
+    if (!ProcDiff_IsSet(&s_mark)) return;
+    if (ProcDiff_Classify(&s_mark, row, &mem, &handles) == PROC_CHANGE_NEW) {
+        StringCchCopyW(buf, cch, L"Started after the mark");
+        return;
+    }
+    if (row->memoryKnown && mem != 0) {
+        UI_FormatSize((ULONGLONG)(mem < 0 ? -mem : mem), size, ARRAYSIZE(size));
+        StringCchPrintfW(buf, cch, L"%c%s private, ", mem < 0 ? L'-' : L'+', size);
+    } else if (row->memoryKnown) {
+        StringCchCopyW(buf, cch, L"+0 private, ");
+    }
+    {
+        size_t len = (size_t)lstrlenW(buf);
+        StringCchPrintfW(buf + len, cch - len, L"%c%ld handles",
+                         handles < 0 ? L'-' : L'+', (long)(handles < 0 ? -handles : handles));
+    }
+}
+
 static void ProcDrawDetails(HWND hwnd, HDC dc)
 {
     RECT rc, r;
@@ -823,6 +848,9 @@ static void ProcDrawDetails(HWND hwnd, HDC dc)
         ProcDetailLine(dc, rc.right / 3 + pad, DPX(36), rc.right / 6, L"CPU", value);
         ProcDetailLine(dc, rc.right / 2 + pad, DPX(36), rc.right / 5, L"PRIVATE MEMORY", other);
         ProcDetailLine(dc, rc.right / 3 + pad, DPX(83), rc.right / 3 - pad, L"ACCOUNT", row->userName);
+        ProcMarkDelta(row, value, ARRAYSIZE(value));
+        if (value[0])
+            ProcDetailLine(dc, rc.right * 2 / 3 + pad, DPX(83), rc.right / 3 - 2 * pad, L"SINCE MARK", value);
         return;
     }
     y = DPX(130);
@@ -834,6 +862,13 @@ static void ProcDrawDetails(HWND hwnd, HDC dc)
     if (row->countersKnown) StringCchPrintfW(value, ARRAYSIZE(value), L"%lu / %lu", (unsigned long)row->threads, (unsigned long)row->handles);
     else lstrcpyW(value, L"Unavailable");
     ProcDetailLine(dc, pad, y, width, L"THREADS / HANDLES", value);
+    ProcMarkDelta(row, value, ARRAYSIZE(value));
+    if (value[0] && rc.bottom > DPX(390)) {
+        /* Takes the next slot; the lifetime lines below need more room. */
+        y += DPX(57);
+        ProcDetailLine(dc, pad, y, width, L"SINCE MARK", value);
+        rc.bottom -= DPX(57);
+    }
     if (rc.bottom > DPX(390)) {
         y += DPX(57);
         if (row->createTime) StringCchPrintfW(value, ARRAYSIZE(value), L"%llu:%02llu:%02llu",
@@ -1747,6 +1782,14 @@ static void ProcCopyDetails(HWND owner)
     StringCchPrintfW(text, ARRAYSIZE(text),
         L"Process: %s\r\nPID: %lu\r\nDescription: %s\r\nAccount: %s\r\nCPU: %.1f%%\r\nPrivate memory: %s\r\nParent PID: %lu\r\n",
         row->imageName, (unsigned long)row->pid, row->description, row->userName, row->cpuPct, memory, (unsigned long)row->parentPid);
+    {
+        WCHAR delta[160];
+        ProcMarkDelta(row, delta, ARRAYSIZE(delta));
+        if (delta[0]) {
+            size_t len = wcslen(text);
+            StringCchPrintfW(text + len, ARRAYSIZE(text) - len, L"Since mark: %s\r\n", delta);
+        }
+    }
     bytes = (wcslen(text) + 1) * sizeof(WCHAR);
     data = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (!data) { App_ReportError(owner, L"Copy details", ERROR_NOT_ENOUGH_MEMORY); return; }
