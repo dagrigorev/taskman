@@ -28,15 +28,16 @@ taskman_add_test(test_settings)
 taskman_add_test(test_launch
     ../src/ui.c ../src/settings.c ../src/sysinfo.c ../src/gpu.c ../src/blame.c
     ../src/tabs/tab_apps.c ../src/tabs/tab_processes.c
-    ../src/tabs/tab_network.c ../src/tabs/tab_users.c ../src/tabs/proc_tree.c
+    ../src/tabs/tab_network.c ../src/tabs/tab_users.c ../src/tabs/proc_tree.c ../src/tabs/proc_diff.c
     ../src/tabs/tab_sensors.c ../src/sensors.c)
 taskman_add_test(test_collector ../src/gpu.c ../src/blame.c ../src/sensors.c)
 taskman_add_test(test_sysinfo_live ../src/sysinfo.c ../src/gpu.c ../src/blame.c ../src/sensors.c)
-taskman_add_test(test_processes ../src/tabs/proc_tree.c ../src/gpu.c)
+taskman_add_test(test_processes ../src/tabs/proc_tree.c ../src/tabs/proc_diff.c ../src/gpu.c)
 taskman_add_test(test_apps)
 taskman_add_test(test_network)
 taskman_add_test(test_services_users)
 taskman_add_test(test_proctree)
+taskman_add_test(test_procdiff)
 taskman_add_test(test_gpu)
 taskman_add_test(test_blame)
 taskman_add_test(test_sensors)

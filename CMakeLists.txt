@@ -59,7 +59,8 @@ set(TASKMAN_PAGE_SOURCES
     src/tabs/tab_network.c
     src/tabs/tab_users.c
     src/tabs/tab_sensors.c
-    src/tabs/proc_tree.c)
+    src/tabs/proc_tree.c
+    src/tabs/proc_diff.c)
 set(TASKMAN_SUPPORT_SOURCES src/ui.c src/settings.c src/sysinfo.c src/gpu.c src/blame.c
     src/sensors.c)
 set(TASKMAN_RESOURCE "${PROJECT_SOURCE_DIR}/res/resource.rc")
@@ -75,7 +76,7 @@ add_executable(taskman WIN32
     src/main.c ${TASKMAN_SUPPORT_SOURCES} ${TASKMAN_PAGE_SOURCES}
     "${TASKMAN_RESOURCE}"
     include/app.h include/ui.h include/ntapi.h include/gdiplusapi.h
-    include/proc_tree.h include/gpu.h include/sensors.h include/blame.h
+    include/proc_tree.h include/proc_diff.h include/gpu.h include/sensors.h include/blame.h
     include/resource.h)
 target_link_libraries(taskman PRIVATE taskman_platform)
 if(MSVC)
