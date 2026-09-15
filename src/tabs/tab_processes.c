@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "proc_tree.h"
 #include "gpu.h"
+#include "blame.h"
 
 #define PROC_COL_GPU 6
 
@@ -19,6 +20,11 @@
 static BYTE      *s_ntBuf;
 static ULONG      s_ntBufSz;
 static ULONG      s_ntUsed;
+/* The listing Proc_Collect walks: the collector's shared enumeration when
+   one was available this sample, otherwise s_ntBuf. Bounds checks use
+   these, never s_ntBuf directly. */
+static const BYTE *s_listBase;
+static ULONG       s_listUsed;
 
 typedef struct { DWORD pid; ULONGLONG createTime; ULONGLONG kernel; ULONGLONG user; } PrevCpu;
 static PrevCpu   *s_prev;
@@ -207,6 +213,8 @@ static const CTM_SYSTEM_PROCESS_INFORMATION *ProcToolhelp(void)
     s_ntBuf = (BYTE *)records;
     s_ntBufSz = (ULONG)(capacity * sizeof(*records));
     s_ntUsed = (ULONG)(count * sizeof(*records));
+    s_listBase = s_ntBuf;
+    s_listUsed = s_ntUsed;
     return (const CTM_SYSTEM_PROCESS_INFORMATION *)s_ntBuf;
 failed:
     CloseHandle(snapshot);
@@ -221,6 +229,17 @@ static const CTM_SYSTEM_PROCESS_INFORMATION *NtEnumProcesses(void)
     ULONG needed = 0;
     int attempts;
 
+    /* Blame_Collect already enumerated on this thread moments ago. */
+    {
+        const BYTE *shared;
+        ULONG used;
+        if (Blame_TakeListing(&shared, &used)) {
+            s_listBase = shared;
+            s_listUsed = used;
+            return (const CTM_SYSTEM_PROCESS_INFORMATION *)shared;
+        }
+    }
+
     if (!pfn) return NULL;
 
     if (!s_ntBuf) {
@@ -233,6 +252,8 @@ static const CTM_SYSTEM_PROCESS_INFORMATION *NtEnumProcesses(void)
         status = pfn(CtmSystemProcessInformation, s_ntBuf, s_ntBufSz, &needed);
         if (NT_SUCCESS(status)) {
             s_ntUsed = needed;
+            s_listBase = s_ntBuf;
+            s_listUsed = needed;
             return needed >= sizeof(CTM_SYSTEM_PROCESS_INFORMATION) && needed <= s_ntBufSz
                 ? (const CTM_SYSTEM_PROCESS_INFORMATION *)s_ntBuf : NULL;
         }
@@ -411,9 +432,9 @@ void Proc_Collect(void)
 
         if (entry->ImageName.Buffer && entry->ImageName.Length > 0 &&
             !(entry->ImageName.Length % sizeof(WCHAR)) &&
-            (ULONG_PTR)entry->ImageName.Buffer >= (ULONG_PTR)s_ntBuf &&
-            (ULONG_PTR)entry->ImageName.Buffer <= (ULONG_PTR)s_ntBuf + s_ntUsed &&
-            entry->ImageName.Length <= (ULONG_PTR)s_ntBuf + s_ntUsed - (ULONG_PTR)entry->ImageName.Buffer) {
+            (ULONG_PTR)entry->ImageName.Buffer >= (ULONG_PTR)s_listBase &&
+            (ULONG_PTR)entry->ImageName.Buffer <= (ULONG_PTR)s_listBase + s_listUsed &&
+            entry->ImageName.Length <= (ULONG_PTR)s_listBase + s_listUsed - (ULONG_PTR)entry->ImageName.Buffer) {
             USHORT len = entry->ImageName.Length / sizeof(WCHAR);
             if (len >= PROC_IMAGE_MAX) len = PROC_IMAGE_MAX - 1;
             memcpy(row->imageName, entry->ImageName.Buffer, len * sizeof(WCHAR));
@@ -476,7 +497,7 @@ void Proc_Collect(void)
 
         if (!entry->NextEntryOffset) break;
         {
-            size_t remaining = s_ntUsed - (size_t)((const BYTE *)entry - s_ntBuf);
+            size_t remaining = s_listUsed - (size_t)((const BYTE *)entry - s_listBase);
             if (entry->NextEntryOffset < sizeof(*entry) ||
                 entry->NextEntryOffset > remaining || remaining - entry->NextEntryOffset < sizeof(*entry))
                 goto failed;
@@ -508,6 +529,7 @@ failed:
 void Proc_Reset(void)
 {
     free(s_ntBuf);   s_ntBuf = NULL;  s_ntBufSz = 0;
+    s_listBase = NULL; s_listUsed = 0;
     free(s_prev);    s_prev  = NULL;  s_prevCnt = 0; s_prevCap = 0;
     s_prevTick    = 0;
     s_userCacheLen = 0; s_userCacheNext = 0; s_pendingPid = 0;

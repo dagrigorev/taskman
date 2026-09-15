@@ -257,6 +257,32 @@ static void TestAliveFromEnumeration(void)
     CHECK(Blame_IsAlive(200, 1200));
 }
 
+/* The raw listing goes to exactly one borrower per successful sample. */
+static void TestTakeListingOnce(void)
+{
+    const BYTE *base = NULL;
+    ULONG used = 0;
+    Blame_Reset();
+    CHECK(!Blame_TakeListing(&base, &used));
+    fakeTick = 1000;
+    fakeCount = 1;
+    Fake(0, 500, 0, 1, L"x.exe");
+    Blame_Collect(1, 0, 0);
+    CHECK(Blame_TakeListing(&base, &used));
+    CHECK(used == sizeof(FakeRecord));
+    CHECK(((const CTM_SYSTEM_PROCESS_INFORMATION *)base)->UniqueProcessId == (HANDLE)(ULONG_PTR)500);
+    CHECK(!Blame_TakeListing(&base, &used));
+
+    failQuery = TRUE;
+    Blame_Collect(2, 0, 0);
+    failQuery = FALSE;
+    CHECK(!Blame_TakeListing(&base, &used));
+
+    Blame_Collect(3, 0, 0);
+    Blame_Reset();
+    CHECK(!Blame_TakeListing(&base, &used));
+}
+
 int main(void)
 {
     TestOfferKeepsTopDescending();
@@ -270,6 +296,7 @@ int main(void)
     TestCollectPidReuse();
     TestCollectFailureStillAligns();
     TestAliveFromEnumeration();
+    TestTakeListingOnce();
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("test_blame: all passed\n");
     return 0;

@@ -80,6 +80,11 @@ void Blame_Collect(ULONG64 sequence, float cpu, float mem);
 void Blame_Reset(void);
 /* Thread-safe copy for the UI, same contract as Blame_RingCopy. */
 int  Blame_Copy(BlameSample *dst, int count);
+/* Hands this sample's raw SystemProcessInformation buffer to another
+   collector on the same thread, so the process table need not enumerate a
+   second time. Once per sample: a second call, or a sample whose query
+   failed, returns FALSE. Valid until the next Blame_Collect or Blame_Reset. */
+BOOL Blame_TakeListing(const BYTE **base, ULONG *used);
 /* TRUE when the latest enumeration saw this pid with this creation time.
    Covers protected processes; may lag an exit by one sample. */
 BOOL Blame_IsAlive(DWORD pid, ULONGLONG createTime);

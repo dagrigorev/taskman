@@ -32,6 +32,19 @@ PFN_NtQuerySystemInformation Nt_QuerySystemInformation(void)
     return noNative ? NULL : (PFN_NtQuerySystemInformation)(void *)
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQuerySystemInformation");
 }
+/* Stands in for the collector's shared enumeration. Serves whatever the
+   test staged, once, the way the real one is handed out once per sample. */
+static BYTE *borrowBuf;
+static ULONG borrowUsed;
+static int borrowTakes;
+BOOL Blame_TakeListing(const BYTE **base, ULONG *used)
+{
+    if (!borrowBuf) return FALSE;
+    *base = borrowBuf; *used = borrowUsed;
+    borrowBuf = NULL;
+    ++borrowTakes;
+    return TRUE;
+}
 #include "../src/tabs/tab_processes.c"
 static int failures;
 #define CHECK(x) do { if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); ++failures; } } while (0)
@@ -315,6 +328,35 @@ int main(void)
         CHECK(found);
     }
     Proc_Reset(); noNative=FALSE;
+    {
+        /* A listing taken from the collector is used as is: with the native
+           query switched off, native counters can only have come from it.
+           The listing is taken once, so the next collection falls back. */
+        static BYTE staged[4 * 1024 * 1024];
+        ULONG needed = 0;
+        int i; BOOL found = FALSE;
+        PFN_NtQuerySystemInformation query = Nt_QuerySystemInformation();
+        CHECK(query && NT_SUCCESS(query(CtmSystemProcessInformation, staged, sizeof(staged), &needed)));
+        noNative = TRUE;
+        borrowBuf = staged; borrowUsed = needed; borrowTakes = 0;
+        Proc_Collect();
+        CHECK(borrowTakes == 1);
+        for (i=0;i<g_sharedCnt;++i) if (g_shared[i].pid==GetCurrentProcessId()) {
+            found = TRUE;
+            CHECK(g_shared[i].countersKnown);
+            CHECK(g_shared[i].memoryKnown);
+        }
+        CHECK(found);
+        Proc_Collect();
+        CHECK(borrowTakes == 1);
+        found = FALSE;
+        for (i=0;i<g_sharedCnt;++i) if (g_shared[i].pid==GetCurrentProcessId()) {
+            found = TRUE;
+            CHECK(!g_shared[i].countersKnown);
+        }
+        CHECK(found);
+        Proc_Reset(); noNative = FALSE;
+    }
     InitCommonControlsEx(&controls);
     parent=CreateWindowExW(0,L"STATIC",L"Process test fixture",0,0,0,100,100,NULL,NULL,GetModuleHandleW(NULL),NULL);
     s_list=CreateWindowExW(0,WC_LISTVIEWW,L"",WS_CHILD|LVS_REPORT|LVS_OWNERDATA,

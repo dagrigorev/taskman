@@ -107,6 +107,7 @@ static BYTE      *s_buf;
 static ULONG      s_bufSize;
 static BlamePrev  s_next[BLAME_MAX_PROCS];
 static ULONGLONG  s_prevTick;
+static ULONG      s_listingUsed;    /* nonzero while the listing is untaken */
 
 /* shared with the UI thread. s_prev doubles as the liveness list: it is
    exactly the processes the latest successful enumeration saw. Written
@@ -190,6 +191,7 @@ void Blame_Collect(ULONG64 sequence, float cpu, float mem)
 
     entry = BlameQuery(&used);
     enumerated = entry != NULL;
+    s_listingUsed = enumerated ? used : 0;
     while (entry) {
         BlameEntry e;
         ULONGLONG cpuTime = (ULONGLONG)entry->KernelTime.QuadPart +
@@ -253,6 +255,7 @@ void Blame_Reset(void)
     Blame_RingReset(&s_ring);
     s_prevCount = 0;
     s_prevTick = 0;
+    s_listingUsed = 0;
     ReleaseSRWLockExclusive(&s_ringLock);
 }
 
@@ -263,6 +266,15 @@ int Blame_Copy(BlameSample *dst, int count)
     copied = Blame_RingCopy(&s_ring, dst, count);
     ReleaseSRWLockShared(&s_ringLock);
     return copied;
+}
+
+BOOL Blame_TakeListing(const BYTE **base, ULONG *used)
+{
+    if (!base || !used || !s_listingUsed || !s_buf) return FALSE;
+    *base = s_buf;
+    *used = s_listingUsed;
+    s_listingUsed = 0;
+    return TRUE;
 }
 
 BOOL Blame_IsAlive(DWORD pid, ULONGLONG createTime)
