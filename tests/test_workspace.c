@@ -185,6 +185,21 @@ int main(void)
         CHECK(GetFocus() != key.hwnd && IsChild(hwnd, GetFocus()));
     }
     CheckBounds(list, page); CheckBounds(GetDlgItem(page, IDC_PROC_DETAILS), page);
+    {
+        /* The inspector repaints every snapshot and its two buttons sit on
+           top of it. Its painting must be clipped around them, which needs
+           WS_CLIPSIBLINGS and both buttons above it in Z order; otherwise
+           the card is drawn over the buttons until they are hovered. */
+        HWND details = GetDlgItem(page, IDC_PROC_DETAILS), walk;
+        BOOL seenOpen = FALSE, seenCopy = FALSE, detailsReached = FALSE;
+        CHECK((GetWindowLongW(details, GWL_STYLE) & WS_CLIPSIBLINGS) != 0);
+        for (walk = GetWindow(page, GW_CHILD); walk; walk = GetWindow(walk, GW_HWNDNEXT)) {
+            if (walk == details) { detailsReached = TRUE; break; }
+            if (walk == GetDlgItem(page, IDC_PROC_OPENLOCATION)) seenOpen = TRUE;
+            if (walk == GetDlgItem(page, IDC_PROC_COPY)) seenCopy = TRUE;
+        }
+        CHECK(detailsReached && seenOpen && seenCopy);
+    }
     StringCchPrintfW(query, ARRAYSIZE(query), L"pid:%lu", (unsigned long)GetCurrentProcessId());
     SetWindowTextW(search, query); CHECK(ListView_GetItemCount(list) == 1);
     ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
