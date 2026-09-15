@@ -226,6 +226,37 @@ static void TestCollectFailureStillAligns(void)
     CHECK(out[0].cpuCount == 0 && out[0].memCount == 0);
 }
 
+/* Liveness comes from the latest enumeration, so a protected process
+   that refuses OpenProcess still counts, and a reused pid does not. */
+static void TestAliveFromEnumeration(void)
+{
+    Blame_Reset();
+    CHECK(!Blame_IsAlive(100, 1100));
+    fakeTick = 1000;
+    fakeCount = 2;
+    Fake(0, 100, 0, 1, L"a.exe");
+    Fake(1, 200, 0, 1, L"b.exe");
+    Link();
+    Blame_Collect(1, 0, 0);
+    CHECK(Blame_IsAlive(100, 1100));
+    CHECK(Blame_IsAlive(200, 1200));
+    CHECK(!Blame_IsAlive(100, 999));      /* same pid, other process */
+
+    fakeTick = 2000;
+    fakeCount = 1;
+    Fake(0, 200, 0, 1, L"b.exe");
+    Blame_Collect(2, 0, 0);
+    CHECK(!Blame_IsAlive(100, 1100));
+    CHECK(Blame_IsAlive(200, 1200));
+
+    /* A failed enumeration keeps the last known list rather than
+       declaring every process dead. */
+    failQuery = TRUE;
+    Blame_Collect(3, 0, 0);
+    failQuery = FALSE;
+    CHECK(Blame_IsAlive(200, 1200));
+}
+
 int main(void)
 {
     TestOfferKeepsTopDescending();
@@ -238,6 +269,7 @@ int main(void)
     TestCollectRanksByDelta();
     TestCollectPidReuse();
     TestCollectFailureStillAligns();
+    TestAliveFromEnumeration();
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("test_blame: all passed\n");
     return 0;

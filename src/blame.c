@@ -105,11 +105,14 @@ typedef struct { DWORD pid; ULONGLONG createTime; ULONGLONG cpuTime; } BlamePrev
 /* collector thread only */
 static BYTE      *s_buf;
 static ULONG      s_bufSize;
-static BlamePrev  s_prev[BLAME_MAX_PROCS], s_next[BLAME_MAX_PROCS];
-static int        s_prevCount;
+static BlamePrev  s_next[BLAME_MAX_PROCS];
 static ULONGLONG  s_prevTick;
 
-/* shared with the UI thread */
+/* shared with the UI thread. s_prev doubles as the liveness list: it is
+   exactly the processes the latest successful enumeration saw. Written
+   only by the collector, and only under the exclusive lock. */
+static BlamePrev  s_prev[BLAME_MAX_PROCS];
+static int        s_prevCount;
 static BlameRing  s_ring;
 static SRWLOCK    s_ringLock = SRWLOCK_INIT;
 
@@ -177,6 +180,7 @@ void Blame_Collect(ULONG64 sequence, float cpu, float mem)
     ULONGLONG elapsed = s_prevTick && now > s_prevTick
         ? (now - s_prevTick) * 10000ULL * Blame_ProcessorCount() : 0;
     int nextCount = 0, i;
+    BOOL enumerated;
 
     ZeroMemory(&sample, sizeof(sample));
     sample.sequence = sequence;
@@ -185,6 +189,7 @@ void Blame_Collect(ULONG64 sequence, float cpu, float mem)
     GetSystemTimeAsFileTime(&sample.wallTime);
 
     entry = BlameQuery(&used);
+    enumerated = entry != NULL;
     while (entry) {
         BlameEntry e;
         ULONGLONG cpuTime = (ULONGLONG)entry->KernelTime.QuadPart +
@@ -229,15 +234,15 @@ void Blame_Collect(ULONG64 sequence, float cpu, float mem)
         }
     }
 
-    if (used) {
+    /* A failed enumeration still pushes, so the ring stays aligned with
+       the history graphs sample for sample, but it keeps the previous
+       baseline and liveness list rather than emptying them. */
+    AcquireSRWLockExclusive(&s_ringLock);
+    if (enumerated) {
         memcpy(s_prev, s_next, (size_t)nextCount * sizeof(s_prev[0]));
         s_prevCount = nextCount;
         s_prevTick = now;
     }
-
-    /* A failed enumeration still pushes, so the ring stays aligned with
-       the history graphs sample for sample. */
-    AcquireSRWLockExclusive(&s_ringLock);
     Blame_RingPush(&s_ring, &sample);
     ReleaseSRWLockExclusive(&s_ringLock);
 }
@@ -246,9 +251,9 @@ void Blame_Reset(void)
 {
     AcquireSRWLockExclusive(&s_ringLock);
     Blame_RingReset(&s_ring);
-    ReleaseSRWLockExclusive(&s_ringLock);
     s_prevCount = 0;
     s_prevTick = 0;
+    ReleaseSRWLockExclusive(&s_ringLock);
 }
 
 int Blame_Copy(BlameSample *dst, int count)
@@ -262,22 +267,14 @@ int Blame_Copy(BlameSample *dst, int count)
 
 BOOL Blame_IsAlive(DWORD pid, ULONGLONG createTime)
 {
-    FILETIME created, exited, kernel, user;
-    DWORD code;
+    /* Answered from the latest enumeration rather than OpenProcess:
+       protected processes refuse even limited access, and painting should
+       not make system calls per row. At most one sample stale. */
     BOOL alive = FALSE;
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process) {
-        /* Protected processes refuse even limited access; a pid that still
-           exists answers with access denied rather than invalid parameter. */
-        return GetLastError() == ERROR_ACCESS_DENIED;
-    }
-    if (GetProcessTimes(process, &created, &exited, &kernel, &user) &&
-        GetExitCodeProcess(process, &code) && code == STILL_ACTIVE) {
-        ULARGE_INTEGER c;
-        c.LowPart = created.dwLowDateTime;
-        c.HighPart = created.dwHighDateTime;
-        alive = c.QuadPart == createTime;
-    }
-    CloseHandle(process);
+    int i;
+    AcquireSRWLockShared(&s_ringLock);
+    for (i = 0; i < s_prevCount && !alive; ++i)
+        alive = s_prev[i].pid == pid && s_prev[i].createTime == createTime;
+    ReleaseSRWLockShared(&s_ringLock);
     return alive;
 }

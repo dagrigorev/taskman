@@ -80,7 +80,8 @@ void Blame_Collect(ULONG64 sequence, float cpu, float mem);
 void Blame_Reset(void);
 /* Thread-safe copy for the UI, same contract as Blame_RingCopy. */
 int  Blame_Copy(BlameSample *dst, int count);
-/* TRUE when a process with this pid and creation time still runs. */
+/* TRUE when the latest enumeration saw this pid with this creation time.
+   Covers protected processes; may lag an exit by one sample. */
 BOOL Blame_IsAlive(DWORD pid, ULONGLONG createTime);
 
 #endif /* CTM_BLAME_H */
