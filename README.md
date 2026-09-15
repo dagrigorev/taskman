@@ -18,6 +18,11 @@ dependencies beyond what ships with Windows.
   terms must all match; `pid:1234` matches a PID exactly. Resource filters show
   processes using at least 1% CPU or 100 MB of private memory. Search and sorting
   still work while sampling is paused.
+- Mark takes a snapshot of every process; later, the summary reads
+  `Since 12:03:44: 4 started, 1 exited (backgroundTaskHost.exe), 1 grew`. New
+  processes are tinted green and grown ones amber (16 MB more private memory or
+  256 more handles), and the "Changed since mark" filter shows only those. A
+  reused PID counts as a new process. Unmark clears it.
 - The process inspector shows identity, account, CPU usage, private memory,
   parent PID, thread/handle counts, CPU time and lifetime I/O where available.
   It moves below the table in smaller windows. Open File Location checks process

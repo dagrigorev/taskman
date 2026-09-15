@@ -40,6 +40,7 @@
 #define IDC_PROC_SUMMARY                2108
 #define IDC_PROC_OPENLOCATION           2109
 #define IDC_PROC_COPY                   2110
+#define IDC_PROC_MARK                   2111
 
 /* Services tab (2200-2299) */
 #define IDC_SVC_LIST                    2200

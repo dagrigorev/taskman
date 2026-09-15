@@ -272,6 +272,47 @@ int main(void)
     CHECK(!ProcMatches(&row, L"", 1));
     CHECK(!ProcMatches(&row, L"", 2));
     {
+        /* "Changed since mark" keeps new and grown rows only, and nothing
+           at all until a mark exists. The summary names what exited. */
+        ProcRow marked[2], now;
+        ProcMarkEntry gone[2];
+        ProcDiffCounts counts;
+        FILETIME wall;
+        SYSTEMTIME st = {0};
+        WCHAR text[512];
+        CHECK(!ProcMatches(&row, L"", 3));
+        ZeroMemory(marked, sizeof(marked));
+        marked[0].pid = 1234; marked[0].createTime = 5;
+        marked[0].privateBytes = 10ULL * 1024 * 1024; marked[0].memoryKnown = TRUE;
+        lstrcpyW(marked[0].imageName, L"Code.exe");
+        marked[1].pid = 77; marked[1].createTime = 1;
+        lstrcpyW(marked[1].imageName, L"gone.exe");
+        st.wYear = 2026; st.wMonth = 9; st.wDay = 15; st.wHour = 12; st.wMinute = 3; st.wSecond = 44;
+        SystemTimeToFileTime(&st, &wall);
+        CHECK(ProcDiff_Take(&s_mark, marked, 2, wall));
+        now = marked[0];
+        CHECK(!ProcMatches(&now, L"", 3));                       /* unchanged */
+        now.privateBytes += PROC_DIFF_GREW_BYTES;
+        CHECK(ProcMatches(&now, L"", 3));                        /* grew */
+        CHECK(!ProcMatches(&now, L"missing", 3));                /* search still applies */
+        now = marked[0]; now.createTime = 6;
+        CHECK(ProcMatches(&now, L"", 3));                        /* new */
+
+        counts.started = 1; counts.exited = 1; counts.grew = 2;
+        gone[0] = s_mark.entries[0];                             /* pid 77 sorts first */
+        ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 1, L"12:03:44");
+        CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: 1 started, 1 exited (gone.exe), 2 grew"));
+        counts.exited = 4;
+        gone[1] = s_mark.entries[1];
+        ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 2, L"12:03:44");
+        CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: 1 started, 4 exited (gone.exe, Code.exe +2 more), 2 grew"));
+        counts.started = counts.exited = counts.grew = 0;
+        ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 0, L"12:03:44");
+        CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: no changes"));
+        ProcDiff_Free(&s_mark);
+        CHECK(!ProcMatches(&now, L"", 3));
+    }
+    {
         WCHAR escaped[128];
         CHECK(ProcCsvField(L"Alice, \"dev\"", escaped, ARRAYSIZE(escaped)));
         CHECK(!wcscmp(escaped, L"\"Alice, \"\"dev\"\"\""));

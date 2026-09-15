@@ -9,6 +9,7 @@
 #include <wctype.h>
 #include "ui.h"
 #include "proc_tree.h"
+#include "proc_diff.h"
 #include "gpu.h"
 #include "blame.h"
 
@@ -97,9 +98,14 @@ static HWND  s_endProcess;
 static HWND  s_search, s_filter, s_details, s_summary;
 static WCHAR s_query[256];
 static int s_filterMode;
+#define PROC_FILTER_CHANGED 3   /* "Changed since mark"                    */
+/* UI thread only. Taken from every collected process, not just the visible
+   ones, so toggling "all users" later does not read as starts and exits. */
+static ProcMark s_mark;
 static BOOL s_refreshing;
 
 static void ProcSnapshot(TabPage *p);
+static WCHAR s_markText[400];   /* summary segment, rebuilt each snapshot   */
 static void ProcCommand(TabPage *p, int id, int code, HWND ctl);
 
 /* Every term must match a field; pid: is deliberately exact. */
@@ -108,6 +114,8 @@ static BOOL ProcMatches(const ProcRow *row, const WCHAR *query, int filter)
     WCHAR token[256], pid[24];
     if (filter == 1 && row->cpuPct < 1.0f) return FALSE;
     if (filter == 2 && (!row->memoryKnown || row->privateBytes < 100ULL * 1024 * 1024)) return FALSE;
+    if (filter == PROC_FILTER_CHANGED &&
+        ProcDiff_Classify(&s_mark, row, NULL, NULL) == PROC_CHANGE_NONE) return FALSE;
     StringCchPrintfW(pid, ARRAYSIZE(pid), L"%lu", (unsigned long)row->pid);
     while (*query) {
         size_t len = 0;
@@ -905,8 +913,10 @@ static void ProcCreate(TabPage *p)
     SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"All resource usage");
     SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"Active CPU (1%+)");
     SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"Memory (100 MB+)");
+    SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"Changed since mark");
     SendMessageW(s_filter, CB_SETCURSEL, 0, 0);
     UI_CreateButton(p->hwnd, IDC_PROC_CLEAR, L"Clear", 0);
+    UI_CreateButton(p->hwnd, IDC_PROC_MARK, ProcDiff_IsSet(&s_mark) ? L"Unmark" : L"Mark", 0);
     UI_CreateButton(p->hwnd, IDC_PROC_EXPORT, L"Export CSV", 0);
     s_summary = UI_CreateStatic(p->hwnd, IDC_PROC_SUMMARY, L"Collecting processes...", SS_LEFT);
     s_details = UI_CreateStatic(p->hwnd, IDC_PROC_DETAILS, L"Process inspector", SS_BLACKRECT);
@@ -924,7 +934,7 @@ static void ProcLayout(TabPage *p, int cx, int cy, BOOL tiny)
     int listBottom, listTop = DPX(75), detailX, detailY, detailW, detailH;
     BOOL side = cx >= DPX(1020) && cy - 2 * margin - bs.cy - listTop >= DPX(340);
     BOOL showDetails = cy >= DPX(340);
-    static const int extra[] = {IDC_PROC_SEARCH, IDC_PROC_FILTER, IDC_PROC_CLEAR, IDC_PROC_EXPORT,
+    static const int extra[] = {IDC_PROC_SEARCH, IDC_PROC_FILTER, IDC_PROC_CLEAR, IDC_PROC_MARK, IDC_PROC_EXPORT,
         IDC_PROC_DETAILS, IDC_PROC_SUMMARY, IDC_PROC_OPENLOCATION, IDC_PROC_COPY};
     int i;
 
@@ -944,10 +954,11 @@ static void ProcLayout(TabPage *p, int cx, int cy, BOOL tiny)
     }
 
     {
-        int searchW = cx - 2 * margin - DPX(365);
+        int searchW = cx - 2 * margin - DPX(445);
         MoveWindow(s_search, margin, margin, searchW, DPX(30), TRUE);
         MoveWindow(s_filter, margin + searchW + DPX(10), margin + DPX(2), DPX(175), DPX(200), TRUE);
-        MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_CLEAR), cx - margin - DPX(170), margin, DPX(60), DPX(30), TRUE);
+        MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_CLEAR), cx - margin - DPX(250), margin, DPX(60), DPX(30), TRUE);
+        MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_MARK), cx - margin - DPX(180), margin, DPX(70), DPX(30), TRUE);
         MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_EXPORT), cx - margin - DPX(100), margin, DPX(100), DPX(30), TRUE);
         MoveWindow(s_summary, margin, margin + DPX(40), cx - 2 * margin, DPX(20), TRUE);
     }
@@ -978,6 +989,64 @@ static void ProcLayout(TabPage *p, int cx, int cy, BOOL tiny)
                    w > DPX(230) ? DPX(230) : w, bs.cy, TRUE);
     }
     UI_PlaceButtonRow(p->hwnd, buttons, (int)ARRAYSIZE(buttons), cx, cy);
+}
+
+/* The summary's mark segment: counts, and the first exited names. */
+static void ProcMarkSummary(WCHAR *buf, size_t cch, const ProcDiffCounts *counts,
+                            const ProcMarkEntry *exited, int shown, const WCHAR *when)
+{
+    int i;
+    if (!counts->started && !counts->exited && !counts->grew) {
+        StringCchPrintfW(buf, cch, L"  |  Since %s: no changes", when);
+        return;
+    }
+    StringCchPrintfW(buf, cch, L"  |  Since %s: %d started, ", when, counts->started);
+    if (counts->exited < 0) {
+        StringCchCatW(buf, cch, L"exits unknown");
+    } else {
+        size_t len = (size_t)lstrlenW(buf);
+        StringCchPrintfW(buf + len, cch - len, L"%d exited", counts->exited);
+        if (shown > counts->exited) shown = counts->exited;
+        for (i = 0; i < shown; ++i) {
+            StringCchCatW(buf, cch, i ? L", " : L" (");
+            StringCchCatW(buf, cch, exited[i].imageName);
+        }
+        if (shown > 0) {
+            if (counts->exited > shown) {
+                len = (size_t)lstrlenW(buf);
+                StringCchPrintfW(buf + len, cch - len, L" +%d more", counts->exited - shown);
+            }
+            StringCchCatW(buf, cch, L")");
+        }
+    }
+    {
+        size_t len = (size_t)lstrlenW(buf);
+        StringCchPrintfW(buf + len, cch - len, L", %d grew", counts->grew);
+    }
+}
+
+static void ProcToggleMark(TabPage *p)
+{
+    HWND button = p ? GetDlgItem(p->hwnd, IDC_PROC_MARK) : NULL;
+    if (ProcDiff_IsSet(&s_mark)) {
+        ProcDiff_Free(&s_mark);
+        if (s_filterMode == PROC_FILTER_CHANGED) {
+            s_filterMode = 0;
+            if (s_filter) SendMessageW(s_filter, CB_SETCURSEL, 0, 0);
+        }
+    } else {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        AcquireSRWLockShared(&g_procLock);
+        if (!ProcDiff_Take(&s_mark, g_shared, g_sharedCnt, now) && g_sharedCnt > 0) {
+            ReleaseSRWLockShared(&g_procLock);
+            App_ReportError(p ? p->hwnd : NULL, L"Mark processes", ERROR_NOT_ENOUGH_MEMORY);
+            return;
+        }
+        ReleaseSRWLockShared(&g_procLock);
+    }
+    if (button) SetWindowTextW(button, ProcDiff_IsSet(&s_mark) ? L"Unmark" : L"Mark");
+    ProcSnapshot(p);
 }
 
 static void ProcSnapshot(TabPage *p)
@@ -1015,6 +1084,23 @@ static void ProcSnapshot(TabPage *p)
         if (g_sharedCnt && !newView) { ReleaseSRWLockShared(&g_procLock); return; }
         ReleaseSRWLockShared(&g_procLock);
 
+        /* Against every collected process, before any visibility filter. */
+        s_markText[0] = 0;
+        if (ProcDiff_IsSet(&s_mark)) {
+            ProcDiffCounts counts;
+            ProcMarkEntry exited[3];
+            FILETIME local;
+            SYSTEMTIME st;
+            WCHAR when[16] = L"mark";
+            ProcDiff_Count(&s_mark, newView, newCnt, &counts, exited, (int)ARRAYSIZE(exited));
+            if (FileTimeToLocalFileTime(&s_mark.wallTime, &local) && FileTimeToSystemTime(&local, &st))
+                StringCchPrintfW(when, ARRAYSIZE(when), L"%02u:%02u:%02u", st.wHour, st.wMinute, st.wSecond);
+            ProcMarkSummary(s_markText, ARRAYSIZE(s_markText), &counts, exited,
+                            counts.exited < (int)ARRAYSIZE(exited) ? counts.exited : (int)ARRAYSIZE(exited), when);
+        } else if (s_filterMode == PROC_FILTER_CHANGED) {
+            StringCchCopyW(s_markText, ARRAYSIZE(s_markText), L"  |  Press Mark first, then look again later");
+        }
+
         free(g_view);
         g_view    = newView;
         g_viewCnt = newCnt;
@@ -1031,7 +1117,7 @@ static void ProcSnapshot(TabPage *p)
     }
     {
         int kept = 0, total = g_viewCnt;
-        WCHAR summary[256];
+        WCHAR summary[640];
         double cpu = 0; ULONGLONG memory = 0;
         WCHAR size[48];
         BOOL treeBuilt = FALSE;
@@ -1086,6 +1172,7 @@ static void ProcSnapshot(TabPage *p)
         UI_FormatSize(memory, size, ARRAYSIZE(size));
         StringCchPrintfW(summary, ARRAYSIZE(summary),
             L"%d of %d processes  |  %.1f%% CPU  |  %s private memory%s", kept, total, cpu, size,
+            s_markText[0] ? s_markText :
             kept == 0 ? L"  |  No matches - try clearing your filters" : L"  |  Click a column to sort");
         if (s_summary) SetWindowTextW(s_summary, summary);
     }
@@ -1192,6 +1279,16 @@ static void ProcToggleCollapse(TabPage *p, int display)
     ProcSnapshot(p);
 }
 
+/* Name-cell tint for a row that started or grew since the mark. */
+static COLORREF ProcChangeTint(const ProcRow *row, COLORREF base)
+{
+    switch (ProcDiff_Classify(&s_mark, row, NULL, NULL)) {
+    case PROC_CHANGE_NEW:  return RGB(222, 245, 228);
+    case PROC_CHANGE_GREW: return RGB(255, 236, 204);
+    default:               return base;
+    }
+}
+
 static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
 {
     *result = 0;
@@ -1296,6 +1393,7 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
                    then let the theme overlay the selected/hot state exactly
                    as it does for columns 1-5. Falls back to the old
                    hand-painted colors when unthemed (classic mode). */
+                back = ProcChangeTint(&g_view[index], back);
                 UI_Fill(draw->nmcd.hdc, &cell, back);
                 if (themeState != LISS_NORMAL) {
                     if (!s_listTheme || FAILED(DrawThemeBackground(s_listTheme, draw->nmcd.hdc,
@@ -1343,7 +1441,9 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
 
             if (index >= 0 && index < g_viewCnt) {
                 BOOL collapsed = g_tree && g_tree[index].collapsed;
-                if (draw->iSubItem == 2) {
+                if (draw->iSubItem == 0) {
+                    bg = ProcChangeTint(&g_view[index], bg);
+                } else if (draw->iSubItem == 2) {
                     float cpu = collapsed ? g_tree[index].cpuRollup : g_view[index].cpuPct;
                     bg = cpu >= 15 ? RGB(255, 218, 178) : cpu >= 1 ? RGB(255, 241, 217) : RGB(249, 246, 238);
                 } else if (draw->iSubItem == PROC_COL_GPU) {
@@ -1689,6 +1789,7 @@ static void ProcCommand(TabPage *p, int id, int code, HWND ctl)
         s_filterMode = 0; SendMessageW(s_filter, CB_SETCURSEL, 0, 0);
         s_query[0] = 0; SetWindowTextW(s_search, L"");
         ProcSnapshot(p); SetFocus(s_search); break;
+    case IDC_PROC_MARK: ProcToggleMark(p); break;
     case IDC_PROC_EXPORT: ProcExport(p->hwnd); break;
     case IDC_PROC_OPENLOCATION: ProcOpenLocation(p->hwnd); break;
     case IDC_PROC_COPY: ProcCopyDetails(p->hwnd); break;
@@ -1791,6 +1892,7 @@ static void ProcDestroy(TabPage *p)
     s_endProcess = NULL;
     s_search = s_filter = s_details = s_summary = NULL;
     s_query[0] = 0; s_filterMode = 0;
+    ProcDiff_Free(&s_mark);
 }
 
 static TabPage s_page = {
