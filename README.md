@@ -37,7 +37,9 @@ dependencies beyond what ships with Windows.
   its busiest still-running process in the Processes tab. Ctrl+B pins the
   highest CPU sample on screen. Culprits are recorded every sample on every
   tab, so a spike can be explained after the fact; pausing freezes them along
-  with the graphs. The per-CPU graph grid and tiny footprint mode do not blame.
+  with the graphs. In the per-CPU grid the cursor runs through every core and
+  the header adds the hovered core's load; culprits stay system wide, since
+  Windows does not measure processes per core. Tiny footprint mode does not blame.
 - Alternating table rows, CPU/memory cell shading, styled navigation, and
   scalable fonts and columns make large snapshots easier to scan. PID 0 (idle
   capacity) is excluded from the process table and its resource totals.

@@ -44,6 +44,7 @@ enum { DRAW_CPU_GAUGE = 1, DRAW_CPU_HIST, DRAW_MEM_GAUGE, DRAW_MEM_HIST };
    scrolls, and lets go once the sample scrolls off the left edge. */
 static int     s_hoverGraph;        /* 0, DRAW_CPU_HIST or DRAW_MEM_HIST   */
 static int     s_hoverX;
+static int     s_hoverY;
 static int     s_pinGraph;
 static ULONG64 s_pinSequence;
 
@@ -83,10 +84,55 @@ static BlameMetric BlameMetricFor(int graph)
     return graph == DRAW_MEM_HIST ? BLAME_BY_MEM : BLAME_BY_CPU;
 }
 
-/* The per-CPU grid plots many small charts; hovering it would be ambiguous. */
 static BOOL BlameEnabledFor(int graph)
 {
-    return graph == DRAW_MEM_HIST || (graph == DRAW_CPU_HIST && !g_cfg.perfOneGraphPerCpu);
+    return graph == DRAW_MEM_HIST || graph == DRAW_CPU_HIST;
+}
+
+/* ------------------------------------------------------ per-CPU grid ---- */
+
+/* Painting and hit testing share this geometry, so a pointer over a cell
+   always resolves to the cell drawn there. */
+static BOOL PerfGridMode(int graph)
+{
+    return graph == DRAW_CPU_HIST && g_cfg.perfOneGraphPerCpu && SysInfo_CpuHistoryCount() > 0;
+}
+
+static void PerfGridShape(UINT cpus, UINT *cols, UINT *rows)
+{
+    *cols = 1;
+    while (*cols * *cols < cpus) ++*cols;
+    *rows = (cpus + *cols - 1) / *cols;
+}
+
+static void PerfCellRect(const RECT *rc, UINT cpus, UINT cpu, RECT *cell)
+{
+    UINT cols, rows;
+    int width = rc->right - rc->left, height = rc->bottom - rc->top;
+    PerfGridShape(cpus, &cols, &rows);
+    cell->left   = rc->left + (int)(cpu % cols) * width / (int)cols;
+    cell->top    = rc->top + (int)(cpu / cols) * height / (int)rows;
+    cell->right  = rc->left + (int)(cpu % cols + 1) * width / (int)cols - 2;
+    cell->bottom = rc->top + (int)(cpu / cols + 1) * height / (int)rows - 2;
+}
+
+/* The processor whose cell contains the point, or -1 for the gutters and
+   the unused tail of the last row. */
+static int PerfCellAt(const RECT *rc, UINT cpus, int x, int y)
+{
+    UINT cols, rows, col, row, cpu;
+    int width = rc->right - rc->left, height = rc->bottom - rc->top;
+    RECT cell;
+    POINT pt;
+    if (!cpus || width <= 0 || height <= 0 || x < rc->left || y < rc->top) return -1;
+    PerfGridShape(cpus, &cols, &rows);
+    col = (UINT)((x - rc->left) * (int)cols / width);
+    row = (UINT)((y - rc->top) * (int)rows / height);
+    cpu = row * cols + col;
+    if (col >= cols || cpu >= cpus) return -1;
+    PerfCellRect(rc, cpus, cpu, &cell);
+    pt.x = x; pt.y = y;
+    return PtInRect(&cell, pt) ? (int)cpu : -1;
 }
 
 static BlameSample *BlameSnapshot(void)
@@ -96,17 +142,28 @@ static BlameSample *BlameSnapshot(void)
     return samples;
 }
 
-/* The sample a graph should call out: the pointer if it is over this
-   graph, otherwise a pin still on screen. -1 when neither applies. */
-static int BlameIndexFor(int graph, int width, const BlameSample *samples)
+void PerfTest_CellRect(const RECT *rc, UINT cpus, UINT cpu, RECT *cell)
 {
-    int index = -1;
-    if (!BlameEnabledFor(graph)) return -1;
-    if (s_hoverGraph == graph)
-        index = Blame_IndexFromX(s_hoverX, width, GRAPH_SAMPLES);
-    else if (s_pinGraph == graph)
-        index = Blame_FindSequence(samples, GRAPH_SAMPLES, s_pinSequence);
-    return index >= 0 && samples[index].sequence ? index : -1;
+    PerfCellRect(rc, cpus, cpu, cell);
+}
+
+int PerfTest_CellAt(const RECT *rc, UINT cpus, int x, int y)
+{
+    return PerfCellAt(rc, cpus, x, y);
+}
+
+/* The sample under a point, for either layout. 'cell' receives the
+   processor hovered in the per-CPU grid, or -1. */
+static int BlameIndexAt(int graph, const RECT *rc, int x, int y, int *cell)
+{
+    RECT box = *rc;
+    *cell = -1;
+    if (PerfGridMode(graph)) {
+        *cell = PerfCellAt(rc, SysInfo_CpuHistoryCount(), x, y);
+        if (*cell < 0) return -1;
+        PerfCellRect(rc, SysInfo_CpuHistoryCount(), (UINT)*cell, &box);
+    }
+    return Blame_IndexFromX(x - box.left, box.right - box.left, GRAPH_SAMPLES);
 }
 
 static void BlameFormatTime(const BlameSample *sample, WCHAR *buf, size_t cch)
@@ -119,23 +176,30 @@ static void BlameFormatTime(const BlameSample *sample, WCHAR *buf, size_t cch)
         StringCchCopyW(buf, cch, L"--:--:--");
 }
 
+static void DrawBlameCursor(HDC dc, const RECT *box, int index)
+{
+    RECT cursor;
+    int x = box->left + Blame_XFromIndex(index, box->right - box->left, GRAPH_SAMPLES);
+    cursor.left = x > box->left ? x - 1 : x;
+    cursor.right = cursor.left + (DPX(2) > 1 ? DPX(2) : 1);
+    cursor.top = box->top;
+    cursor.bottom = box->bottom;
+    UI_Fill(dc, &cursor, UI_INK);
+}
+
+/* 'x' is the column the panel describes and must stay clear of; 'extra'
+   is appended to the header, or NULL. */
 static void DrawBlameOverlay(HDC dc, const RECT *rc, int graph,
-                             const BlameSample *sample, int index, COLORREF accent)
+                             const BlameSample *sample, int x, const WCHAR *extra,
+                             COLORREF accent)
 {
     BlameMetric metric = BlameMetricFor(graph);
     const BlameEntry *top = metric == BLAME_BY_MEM ? sample->byMem : sample->byCpu;
     int count = metric == BLAME_BY_MEM ? sample->memCount : sample->cpuCount;
     int width = rc->right - rc->left, height = rc->bottom - rc->top;
-    int x = rc->left + Blame_XFromIndex(index, width, GRAPH_SAMPLES);
-    int rowH = DPX(17), panelW = DPX(240), panelH, i;
-    RECT cursor, panel, line;
+    int rowH = DPX(17), panelW = DPX(260), panelH, i;
+    RECT panel, line;
     WCHAR text[128], when[16];
-
-    cursor.left = x > rc->left ? x - 1 : x;
-    cursor.right = cursor.left + (DPX(2) > 1 ? DPX(2) : 1);
-    cursor.top = rc->top;
-    cursor.bottom = rc->bottom;
-    UI_Fill(dc, &cursor, UI_INK);
 
     panelH = rowH * ((count ? count : 1) + 1) + DPX(10);
     if (panelW > width - DPX(8)) panelW = width - DPX(8);
@@ -156,9 +220,10 @@ static void DrawBlameOverlay(HDC dc, const RECT *rc, int graph,
     line.top += DPX(5);
     line.bottom = line.top + rowH;
     BlameFormatTime(sample, when, ARRAYSIZE(when));
-    StringCchPrintfW(text, ARRAYSIZE(text), L"%s   %s %.0f%%", when,
+    StringCchPrintfW(text, ARRAYSIZE(text), L"%s   %s %.0f%%%s", when,
                      metric == BLAME_BY_MEM ? L"Memory" : L"CPU",
-                     (double)(metric == BLAME_BY_MEM ? sample->mem : sample->cpu));
+                     (double)(metric == BLAME_BY_MEM ? sample->mem : sample->cpu),
+                     extra ? extra : L"");
     UI_Text(dc, text, line, 1, accent, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
     if (!count) {
@@ -192,37 +257,66 @@ static void DrawBlameOverlay(HDC dc, const RECT *rc, int graph,
 static void DrawBlame(HDC dc, const RECT *rc, int graph, COLORREF accent)
 {
     BlameSample *samples;
-    int index;
-    if (!BlameEnabledFor(graph) || (s_hoverGraph != graph && s_pinGraph != graph)) return;
+    int index = -1, cell = -1;
+    if (s_hoverGraph != graph && s_pinGraph != graph) return;
     samples = BlameSnapshot();
     if (!samples) return;
-    index = BlameIndexFor(graph, rc->right - rc->left, samples);
-    if (index >= 0)
-        DrawBlameOverlay(dc, rc, graph, &samples[index], index, accent);
-    else if (s_pinGraph == graph)
+    if (s_hoverGraph == graph)
+        index = BlameIndexAt(graph, rc, s_hoverX, s_hoverY, &cell);
+    else
+        index = Blame_FindSequence(samples, GRAPH_SAMPLES, s_pinSequence);
+    if (index >= 0 && samples[index].sequence) {
+        WCHAR extra[48] = L"";
+        int anchor = rc->left + Blame_XFromIndex(index, rc->right - rc->left, GRAPH_SAMPLES);
+        if (PerfGridMode(graph)) {
+            /* Processes are only measured system wide, so every cell shares
+               one list; the cursor runs through all of them to say so, and
+               the hovered core's own load joins the header. */
+            UINT cpus = SysInfo_CpuHistoryCount(), cpu;
+            for (cpu = 0; cpu < cpus; ++cpu) {
+                RECT box;
+                PerfCellRect(rc, cpus, cpu, &box);
+                DrawBlameCursor(dc, &box, index);
+                if ((int)cpu == cell)
+                    anchor = box.left + Blame_XFromIndex(index, box.right - box.left, GRAPH_SAMPLES);
+            }
+            if (cell >= 0) {
+                float busy[GRAPH_SAMPLES], kernel[GRAPH_SAMPLES];
+                SysInfo_CopyProcessorHistory((UINT)cell, busy, kernel, GRAPH_SAMPLES);
+                StringCchPrintfW(extra, ARRAYSIZE(extra), L"   core %d %.0f%%",
+                                 cell, (double)busy[index]);
+            }
+        } else {
+            DrawBlameCursor(dc, rc, index);
+        }
+        DrawBlameOverlay(dc, rc, graph, &samples[index], anchor, extra[0] ? extra : NULL, accent);
+    } else if (s_pinGraph == graph && s_hoverGraph != graph) {
         s_pinGraph = 0;             /* the pinned sample scrolled away */
+    }
     free(samples);
 }
 
 /* The busiest culprit under the pointer that has not exited since. */
-static BOOL BlameCulpritAt(HWND hwnd, int graph, int x, DWORD *pid)
+static BOOL BlameCulpritAt(HWND hwnd, int graph, int x, int y, DWORD *pid)
 {
     BlameSample *samples;
     RECT rc;
     BOOL found = FALSE;
-    int index, count, i;
+    int index, cell, count, i;
     const BlameEntry *top;
     if (!BlameEnabledFor(graph)) return FALSE;
     samples = BlameSnapshot();
     if (!samples) return FALSE;
     GetClientRect(hwnd, &rc);
-    index = Blame_IndexFromX(x, rc.right - rc.left, GRAPH_SAMPLES);
-    top = graph == DRAW_MEM_HIST ? samples[index].byMem : samples[index].byCpu;
-    count = graph == DRAW_MEM_HIST ? samples[index].memCount : samples[index].cpuCount;
-    for (i = 0; i < count && !found; ++i) {
-        if (Blame_IsAlive(top[i].pid, top[i].createTime)) {
-            *pid = top[i].pid;
-            found = TRUE;
+    index = BlameIndexAt(graph, &rc, x, y, &cell);
+    if (index >= 0) {
+        top = graph == DRAW_MEM_HIST ? samples[index].byMem : samples[index].byCpu;
+        count = graph == DRAW_MEM_HIST ? samples[index].memCount : samples[index].cpuCount;
+        for (i = 0; i < count && !found; ++i) {
+            if (Blame_IsAlive(top[i].pid, top[i].createTime)) {
+                *pid = top[i].pid;
+                found = TRUE;
+            }
         }
     }
     free(samples);
@@ -238,8 +332,6 @@ static void BlamePinPeak(void)
     if (index >= 0) {
         s_pinGraph = DRAW_CPU_HIST;
         s_pinSequence = samples[index].sequence;
-        /* The pin belongs to the single CPU graph. */
-        g_cfg.perfOneGraphPerCpu = FALSE;
     } else {
         MessageBeep(MB_OK);
     }
@@ -274,6 +366,7 @@ static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             }
             s_hoverGraph = (int)ref;
             s_hoverX = GET_X_LPARAM(lp);
+            s_hoverY = GET_Y_LPARAM(lp);
             s_pinGraph = 0;
             InvalidateRect(hwnd, NULL, FALSE);
         }
@@ -296,7 +389,7 @@ static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     case WM_LBUTTONUP:
         if (BlameEnabledFor((int)ref)) {
             DWORD pid;
-            if (BlameCulpritAt(hwnd, (int)ref, GET_X_LPARAM(lp), &pid)) {
+            if (BlameCulpritAt(hwnd, (int)ref, GET_X_LPARAM(lp), GET_Y_LPARAM(lp), &pid)) {
                 s_hoverGraph = 0;
                 App_ShowProcess(pid);
             } else {
@@ -337,17 +430,12 @@ static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             float hist[GRAPH_SAMPLES], hist2[GRAPH_SAMPLES];
             UINT cpus = SysInfo_CpuHistoryCount();
             if (g_cfg.perfOneGraphPerCpu && cpus) {
-                UINT cols = 1, rows, cpu;
-                int width = rc.right - rc.left, height = rc.bottom - rc.top;
-                while (cols * cols < cpus) ++cols;
-                rows = (cpus + cols - 1) / cols;
+                UINT cpu;
                 UI_Fill(hdc, &rc, UI_SURFACE);
                 for (cpu = 0; cpu < cpus; ++cpu) {
-                    RECT cell = { rc.left + (int)(cpu % cols) * width / (int)cols,
-                                  rc.top + (int)(cpu / cols) * height / (int)rows,
-                                  rc.left + (int)(cpu % cols + 1) * width / (int)cols - 2,
-                                  rc.top + (int)(cpu / cols + 1) * height / (int)rows - 2 };
+                    RECT cell;
                     WCHAR label[32];
+                    PerfCellRect(&rc, cpus, cpu, &cell);
                     SysInfo_CopyProcessorHistory(cpu, hist, hist2, GRAPH_SAMPLES);
                     DrawHistory(hdc, &cell, hist, g_cfg.perfShowKernelTimes ? hist2 : NULL, GRAPH_SAMPLES, UI_BLUE);
                     StringCchPrintfW(label, ARRAYSIZE(label), L"CPU %u", cpu);
@@ -355,6 +443,7 @@ static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                     if (cell.right - cell.left > 45 && cell.bottom - cell.top > 20)
                         DrawTextW(hdc, label, -1, &cell, DT_TOP | DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
                 }
+                DrawBlame(hdc, &rc, DRAW_CPU_HIST, UI_BLUE);
                 break;
             }
             SysInfo_CopyCpuHistory(hist, GRAPH_SAMPLES);

@@ -331,6 +331,34 @@ int main(void)
         Pump(60);
         CHECK(g_active == TAB_PROCESSES);
         SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
+
+        /* Per-CPU grid: Ctrl+B pins without leaving the grid, and a click
+           on the gutter between two cells names no sample, so it must not
+           switch tabs. */
+        g_cfg.perfOneGraphPerCpu = TRUE;
+        InvalidateRect(cpuGraph, NULL, FALSE);
+        SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_BLAME_PEAK, 0);
+        Pump(60);
+        CHECK(g_cfg.perfOneGraphPerCpu);
+        Capture(hwnd, L"tests/.build/workspace-blame-grid.bmp");
+        {
+            UINT cpus = SysInfo_CpuHistoryCount();
+            GetClientRect(cpuGraph, &client);
+            if (cpus > 1) {
+                RECT cell;
+                LPARAM gutter;
+                PerfTest_CellRect(&client, cpus, 0, &cell);
+                gutter = MAKELPARAM(cell.right, cell.top + 1);   /* right is exclusive */
+                CHECK(PerfTest_CellAt(&client, cpus, cell.left + 1, cell.top + 1) == 0);
+                CHECK(PerfTest_CellAt(&client, cpus, cell.right, cell.top + 1) == -1);
+                CHECK(PerfTest_CellAt(&client, cpus, -1, 0) == -1);
+                SendMessageW(cpuGraph, WM_MOUSEMOVE, 0, gutter);
+                SendMessageW(cpuGraph, WM_LBUTTONUP, 0, gutter);
+                Pump(60);
+                CHECK(g_active == TAB_PERFORMANCE);
+            }
+        }
+        g_cfg.perfOneGraphPerCpu = FALSE;
     }
     SwitchToTab(TAB_PROCESSES, FALSE);
     /* Clear the search before the GPU column check: a filtered list can be
