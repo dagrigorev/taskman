@@ -3,6 +3,7 @@
  * ------------------------------------------------------------------------ */
 #include "app.h"
 #include "ui.h"
+#include "blame.h"
 
 typedef struct {
     int   id;
@@ -36,7 +37,15 @@ static float s_memNow;
 
 enum { DRAW_CPU_GAUGE = 1, DRAW_CPU_HIST, DRAW_MEM_GAUGE, DRAW_MEM_HIST };
 
-#define GRAPH_SAMPLES 128
+#define GRAPH_SAMPLES BLAME_SAMPLES   /* one blame slot per plotted column */
+
+/* Spike Blame: which history graph the pointer is over, and where. A pin
+   (Ctrl+B) names a sample by sequence so it rides along as the graph
+   scrolls, and lets go once the sample scrolls off the left edge. */
+static int     s_hoverGraph;        /* 0, DRAW_CPU_HIST or DRAW_MEM_HIST   */
+static int     s_hoverX;
+static int     s_pinGraph;
+static ULONG64 s_pinSequence;
 
 static void DrawGauge(HDC dc, const RECT *rc, float pct, COLORREF color)
 {
@@ -67,6 +76,177 @@ static void DrawHistory(HDC dc, const RECT *rc,
         UI_ChartLine(dc, *rc, kernel, count, RGB(218, 137, 44), DPX(1));
 }
 
+/* ------------------------------------------------------------- blame ---- */
+
+static BlameMetric BlameMetricFor(int graph)
+{
+    return graph == DRAW_MEM_HIST ? BLAME_BY_MEM : BLAME_BY_CPU;
+}
+
+/* The per-CPU grid plots many small charts; hovering it would be ambiguous. */
+static BOOL BlameEnabledFor(int graph)
+{
+    return graph == DRAW_MEM_HIST || (graph == DRAW_CPU_HIST && !g_cfg.perfOneGraphPerCpu);
+}
+
+static BlameSample *BlameSnapshot(void)
+{
+    BlameSample *samples = (BlameSample *)malloc(GRAPH_SAMPLES * sizeof(BlameSample));
+    if (samples) Blame_Copy(samples, GRAPH_SAMPLES);
+    return samples;
+}
+
+/* The sample a graph should call out: the pointer if it is over this
+   graph, otherwise a pin still on screen. -1 when neither applies. */
+static int BlameIndexFor(int graph, int width, const BlameSample *samples)
+{
+    int index = -1;
+    if (!BlameEnabledFor(graph)) return -1;
+    if (s_hoverGraph == graph)
+        index = Blame_IndexFromX(s_hoverX, width, GRAPH_SAMPLES);
+    else if (s_pinGraph == graph)
+        index = Blame_FindSequence(samples, GRAPH_SAMPLES, s_pinSequence);
+    return index >= 0 && samples[index].sequence ? index : -1;
+}
+
+static void BlameFormatTime(const BlameSample *sample, WCHAR *buf, size_t cch)
+{
+    FILETIME local;
+    SYSTEMTIME st;
+    if (FileTimeToLocalFileTime(&sample->wallTime, &local) && FileTimeToSystemTime(&local, &st))
+        StringCchPrintfW(buf, cch, L"%02u:%02u:%02u", st.wHour, st.wMinute, st.wSecond);
+    else
+        StringCchCopyW(buf, cch, L"--:--:--");
+}
+
+static void DrawBlameOverlay(HDC dc, const RECT *rc, int graph,
+                             const BlameSample *sample, int index, COLORREF accent)
+{
+    BlameMetric metric = BlameMetricFor(graph);
+    const BlameEntry *top = metric == BLAME_BY_MEM ? sample->byMem : sample->byCpu;
+    int count = metric == BLAME_BY_MEM ? sample->memCount : sample->cpuCount;
+    int width = rc->right - rc->left, height = rc->bottom - rc->top;
+    int x = rc->left + Blame_XFromIndex(index, width, GRAPH_SAMPLES);
+    int rowH = DPX(17), panelW = DPX(240), panelH, i;
+    RECT cursor, panel, line;
+    WCHAR text[128], when[16];
+
+    cursor.left = x > rc->left ? x - 1 : x;
+    cursor.right = cursor.left + (DPX(2) > 1 ? DPX(2) : 1);
+    cursor.top = rc->top;
+    cursor.bottom = rc->bottom;
+    UI_Fill(dc, &cursor, UI_INK);
+
+    panelH = rowH * ((count ? count : 1) + 1) + DPX(10);
+    if (panelW > width - DPX(8)) panelW = width - DPX(8);
+    if (panelH > height - DPX(8)) panelH = height - DPX(8);
+    if (panelW < DPX(90) || panelH < rowH * 2) return;
+
+    /* Keep the panel off the column it describes. */
+    panel.left = x + DPX(10) + panelW <= rc->right - DPX(4) ? x + DPX(10) : x - DPX(10) - panelW;
+    if (panel.left < rc->left + DPX(4)) panel.left = rc->left + DPX(4);
+    panel.top = rc->top + DPX(4);
+    panel.right = panel.left + panelW;
+    panel.bottom = panel.top + panelH;
+    UI_Card(dc, &panel, UI_SURFACE, accent);
+
+    line = panel;
+    line.left += DPX(8);
+    line.right -= DPX(8);
+    line.top += DPX(5);
+    line.bottom = line.top + rowH;
+    BlameFormatTime(sample, when, ARRAYSIZE(when));
+    StringCchPrintfW(text, ARRAYSIZE(text), L"%s   %s %.0f%%", when,
+                     metric == BLAME_BY_MEM ? L"Memory" : L"CPU",
+                     (double)(metric == BLAME_BY_MEM ? sample->mem : sample->cpu));
+    UI_Text(dc, text, line, 1, accent, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+    if (!count) {
+        OffsetRect(&line, 0, rowH);
+        UI_Text(dc, L"No measurable process", line, 0, UI_MUTED,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        return;
+    }
+    for (i = 0; i < count; ++i) {
+        RECT name, value;
+        BOOL alive;
+        OffsetRect(&line, 0, rowH);
+        if (line.bottom > panel.bottom) break;
+        alive = Blame_IsAlive(top[i].pid, top[i].createTime);
+        name = value = line;
+        value.left = line.right - DPX(70);
+        name.right = value.left - DPX(4);
+        StringCchPrintfW(text, ARRAYSIZE(text), alive ? L"%s (%lu)" : L"%s (%lu) exited",
+                         top[i].image, (unsigned long)top[i].pid);
+        UI_Text(dc, text, name, 0, alive ? UI_INK : UI_MUTED,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        if (metric == BLAME_BY_MEM)
+            UI_FormatSize(top[i].privateBytes, text, ARRAYSIZE(text));
+        else
+            StringCchPrintfW(text, ARRAYSIZE(text), L"%.1f%%", (double)top[i].cpuPct);
+        UI_Text(dc, text, value, 0, alive ? UI_INK : UI_MUTED,
+                DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    }
+}
+
+static void DrawBlame(HDC dc, const RECT *rc, int graph, COLORREF accent)
+{
+    BlameSample *samples;
+    int index;
+    if (!BlameEnabledFor(graph) || (s_hoverGraph != graph && s_pinGraph != graph)) return;
+    samples = BlameSnapshot();
+    if (!samples) return;
+    index = BlameIndexFor(graph, rc->right - rc->left, samples);
+    if (index >= 0)
+        DrawBlameOverlay(dc, rc, graph, &samples[index], index, accent);
+    else if (s_pinGraph == graph)
+        s_pinGraph = 0;             /* the pinned sample scrolled away */
+    free(samples);
+}
+
+/* The busiest culprit under the pointer that has not exited since. */
+static BOOL BlameCulpritAt(HWND hwnd, int graph, int x, DWORD *pid)
+{
+    BlameSample *samples;
+    RECT rc;
+    BOOL found = FALSE;
+    int index, count, i;
+    const BlameEntry *top;
+    if (!BlameEnabledFor(graph)) return FALSE;
+    samples = BlameSnapshot();
+    if (!samples) return FALSE;
+    GetClientRect(hwnd, &rc);
+    index = Blame_IndexFromX(x, rc.right - rc.left, GRAPH_SAMPLES);
+    top = graph == DRAW_MEM_HIST ? samples[index].byMem : samples[index].byCpu;
+    count = graph == DRAW_MEM_HIST ? samples[index].memCount : samples[index].cpuCount;
+    for (i = 0; i < count && !found; ++i) {
+        if (Blame_IsAlive(top[i].pid, top[i].createTime)) {
+            *pid = top[i].pid;
+            found = TRUE;
+        }
+    }
+    free(samples);
+    return found;
+}
+
+static void BlamePinPeak(void)
+{
+    BlameSample *samples = BlameSnapshot();
+    int index;
+    if (!samples) return;
+    index = Blame_FindPeak(samples, GRAPH_SAMPLES, BLAME_BY_CPU);
+    if (index >= 0) {
+        s_pinGraph = DRAW_CPU_HIST;
+        s_pinSequence = samples[index].sequence;
+        /* The pin belongs to the single CPU graph. */
+        g_cfg.perfOneGraphPerCpu = FALSE;
+    } else {
+        MessageBeep(MB_OK);
+    }
+    free(samples);
+    if (s_cpuHistory) InvalidateRect(s_cpuHistory, NULL, FALSE);
+}
+
 static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                        UINT_PTR id, DWORD_PTR ref)
 {
@@ -74,11 +254,77 @@ static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     case WM_ERASEBKGND:
         return TRUE;
 
+    case WM_NCHITTEST:
+        /* Static controls let the mouse fall through unless told not to. */
+        /* Tiny footprint keeps the fall-through: its restore gesture is a
+           double-click that must reach the page. */
+        if (((int)ref == DRAW_CPU_HIST || (int)ref == DRAW_MEM_HIST) && !g_cfg.tiny)
+            return HTCLIENT;
+        break;
+
+    case WM_MOUSEMOVE:
+        if ((int)ref == DRAW_CPU_HIST || (int)ref == DRAW_MEM_HIST) {
+            if (s_hoverGraph != (int)ref) {
+                TRACKMOUSEEVENT tme;
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                tme.dwHoverTime = 0;
+                TrackMouseEvent(&tme);
+            }
+            s_hoverGraph = (int)ref;
+            s_hoverX = GET_X_LPARAM(lp);
+            s_pinGraph = 0;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        break;
+
+    case WM_MOUSELEAVE:
+        if (s_hoverGraph == (int)ref) {
+            s_hoverGraph = 0;
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        break;
+
+    case WM_SETCURSOR:
+        if (BlameEnabledFor((int)ref)) {
+            SetCursor(LoadCursorW(NULL, IDC_HAND));
+            return TRUE;
+        }
+        break;
+
+    case WM_LBUTTONUP:
+        if (BlameEnabledFor((int)ref)) {
+            DWORD pid;
+            if (BlameCulpritAt(hwnd, (int)ref, GET_X_LPARAM(lp), &pid)) {
+                s_hoverGraph = 0;
+                App_ShowProcess(pid);
+            } else {
+                MessageBeep(MB_OK);
+            }
+            return 0;
+        }
+        break;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
+        HDC screen = BeginPaint(hwnd, &ps);
+        HDC hdc = NULL;
+        HBITMAP bitmap = NULL;
+        HGDIOBJ oldBitmap = NULL;
         RECT rc;
         GetClientRect(hwnd, &rc);
+        /* Buffered: the blame overlay repaints on every mouse move and
+           would otherwise flicker over the freshly filled chart. */
+        if (rc.right > 0 && rc.bottom > 0) {
+            hdc = CreateCompatibleDC(screen);
+            if (hdc) bitmap = CreateCompatibleBitmap(screen, rc.right, rc.bottom);
+            if (bitmap) oldBitmap = SelectObject(hdc, bitmap);
+        }
+        if (!bitmap) {
+            if (hdc) DeleteDC(hdc);
+            hdc = screen;
+        }
 
         switch ((int)ref) {
         case DRAW_CPU_GAUGE:
@@ -118,17 +364,25 @@ static LRESULT CALLBACK GraphSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             } else {
                 DrawHistory(hdc, &rc, hist, NULL, GRAPH_SAMPLES, UI_BLUE);
             }
+            DrawBlame(hdc, &rc, DRAW_CPU_HIST, UI_BLUE);
             break;
         }
         case DRAW_MEM_HIST: {
             float hist[GRAPH_SAMPLES];
             SysInfo_CopyMemHistory(hist, GRAPH_SAMPLES);
             DrawHistory(hdc, &rc, hist, NULL, GRAPH_SAMPLES, UI_VIOLET);
+            DrawBlame(hdc, &rc, DRAW_MEM_HIST, UI_VIOLET);
             break;
         }
         default:
             UI_Fill(hdc, &rc, UI_SURFACE);
             break;
+        }
+        if (hdc != screen) {
+            BitBlt(screen, 0, 0, rc.right, rc.bottom, hdc, 0, 0, SRCCOPY);
+            SelectObject(hdc, oldBitmap);
+            DeleteObject(bitmap);
+            DeleteDC(hdc);
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -367,6 +621,7 @@ static void PerfBuildViewMenu(TabPage *p, HMENU view)
     AppendMenuW(sub, MF_STRING, IDM_VIEW_CPU_PERCPU,   L"One Graph &Per CPU");
     AppendMenuW(view, MF_POPUP, (UINT_PTR)sub, L"&CPU History");
     AppendMenuW(view, MF_STRING, IDM_VIEW_SHOWKERNELTIMES, L"Show &Kernel Times");
+    AppendMenuW(view, MF_STRING, IDM_VIEW_BLAME_PEAK, L"&Blame CPU Peak\tCtrl+B");
 }
 
 static void PerfInitViewMenu(TabPage *p, HMENU view)
@@ -397,6 +652,9 @@ static void PerfCommand(TabPage *p, int id, int code, HWND ctl)
         g_cfg.perfShowKernelTimes = !g_cfg.perfShowKernelTimes;
         if (s_cpuHistory) InvalidateRect(s_cpuHistory, NULL, FALSE);
         break;
+    case IDM_VIEW_BLAME_PEAK:
+        BlamePinPeak();
+        break;
     case IDC_PERF_RESMON:
         if (App_OpenSystemTool(p->hwnd, FALSE)) App_MinimizeOnUse();
         break;
@@ -415,6 +673,7 @@ static void PerfDestroy(TabPage *p)
 {
     (void)p;
     s_cpuGauge = s_cpuHistory = s_memGauge = s_memHistory = NULL;
+    s_hoverGraph = s_pinGraph = 0;
 }
 
 static TabPage s_page = {

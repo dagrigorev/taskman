@@ -1,5 +1,6 @@
 /* Exercise real windows and controls without writing settings or running tasks. */
 #include "../include/app.h"
+#include "../include/blame.h"
 #include <stdio.h>
 static void IgnoreSettingsSave(void) {}
 #define Settings_Save IgnoreSettingsSave
@@ -301,6 +302,36 @@ int main(void)
     CHECK(!Gpu_IsEnabled());
     SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
     Capture(hwnd, L"tests/.build/workspace-performance.bmp");
+    {
+        /* Spike Blame: hover and pin draw over the graphs, and a click on
+           the memory graph jumps to its biggest culprit still running. The
+           memory list is used because it is never empty, unlike CPU on an
+           idle machine. */
+        HWND memGraph = GetDlgItem(TabPerformance()->hwnd, IDC_PERF_MEMHISTORY);
+        HWND cpuGraph = GetDlgItem(TabPerformance()->hwnd, IDC_PERF_CPUHISTORY);
+        BlameSample latest;
+        RECT client;
+        LPARAM right;
+        Pump(1500);
+        CHECK(Blame_Copy(&latest, 1) == 1);
+        CHECK(latest.memCount > 0);
+        CHECK(memGraph && cpuGraph);
+        SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_BLAME_PEAK, 0);
+        Pump(60);
+        CHECK(g_active == TAB_PERFORMANCE);
+        Capture(hwnd, L"tests/.build/workspace-blame-pin.bmp");
+
+        GetClientRect(memGraph, &client);
+        right = MAKELPARAM(client.right - 2, client.bottom / 2);
+        /* No hover capture: the fixture sits off screen, so TrackMouseEvent
+           reports the leave at once and the overlay is gone before a
+           capture could see it. The click path does not depend on hover. */
+        SendMessageW(memGraph, WM_MOUSEMOVE, 0, right);
+        SendMessageW(memGraph, WM_LBUTTONUP, 0, right);
+        Pump(60);
+        CHECK(g_active == TAB_PROCESSES);
+        SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
+    }
     SwitchToTab(TAB_PROCESSES, FALSE);
     /* Clear the search before the GPU column check: a filtered list can be
        a single process that genuinely uses no GPU, which would make the

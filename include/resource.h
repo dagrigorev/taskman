@@ -129,6 +129,7 @@
 #define IDM_VIEW_TOGGLEPAUSE            40073
 #define IDM_PROC_FIND                   40074
 #define IDM_VIEW_PROCTREE               40075
+#define IDM_VIEW_BLAME_PEAK             40076
 
 /* Processes > Select Columns... popup: one command per toggleable column.
    Reserved range of its own; the popup uses TPM_RETURNCMD, but these must

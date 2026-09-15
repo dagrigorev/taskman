@@ -31,6 +31,13 @@ dependencies beyond what ships with Windows.
 - CPU/memory graphs use distinct colors; per-processor and kernel-time graph
   options remain available in View. Networking adds sortable receive/send rates
   in B/s, KB/s and larger units alongside utilization and link speed.
+- Spike Blame: hover the CPU or memory history graph to see the five processes
+  using the most CPU or private memory at that moment, with the time of the
+  sample. Processes that have since exited are marked. Click a column to open
+  its busiest still-running process in the Processes tab. Ctrl+B pins the
+  highest CPU sample on screen. Culprits are recorded every sample on every
+  tab, so a spike can be explained after the fact; pausing freezes them along
+  with the graphs. The per-CPU graph grid and tiny footprint mode do not blame.
 - Alternating table rows, CPU/memory cell shading, styled navigation, and
   scalable fonts and columns make large snapshots easier to scan. PID 0 (idle
   capacity) is excluded from the process table and its resource totals.
@@ -44,6 +51,7 @@ both the header and page controls.
 | --- | --- |
 | Ctrl+F | Open Processes and focus search |
 | Ctrl+P | Pause/resume the previous sampling speed |
+| Ctrl+B | Pin the CPU peak on the Performance tab and show its culprits |
 | Ctrl+N | Run a new task |
 | F5 | Refresh once, including while paused |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next/previous tab |

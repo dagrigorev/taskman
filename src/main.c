@@ -1290,6 +1290,11 @@ static void OnCommand(HWND hwnd, int id, int code, HWND ctl)
         if (g_page[TAB_PROCESSES] && g_page[TAB_PROCESSES]->OnCommand)
             g_page[TAB_PROCESSES]->OnCommand(g_page[TAB_PROCESSES], IDM_PROC_FIND, 0, NULL);
         return;
+    case IDM_VIEW_BLAME_PEAK:
+        SwitchToTab(TAB_PERFORMANCE, FALSE);
+        if (g_page[TAB_PERFORMANCE] && g_page[TAB_PERFORMANCE]->OnCommand)
+            g_page[TAB_PERFORMANCE]->OnCommand(g_page[TAB_PERFORMANCE], IDM_VIEW_BLAME_PEAK, 0, NULL);
+        return;
     case IDM_VIEW_TOGGLEPAUSE:
         if (g_cfg.updateSpeed == SPEED_PAUSED) g_cfg.updateSpeed = g_resumeSpeed;
         else { g_resumeSpeed = g_cfg.updateSpeed; g_cfg.updateSpeed = SPEED_PAUSED; }
@@ -1644,13 +1649,14 @@ static void EnableDebugPrivilege(void)
 
 static HACCEL BuildAccelerators(void)
 {
-    ACCEL acc[6];
+    ACCEL acc[7];
     acc[0].fVirt = FVIRTKEY;                     acc[0].key = VK_F5;  acc[0].cmd = IDM_VIEW_REFRESH;
     acc[1].fVirt = FVIRTKEY | FCONTROL;          acc[1].key = VK_TAB; acc[1].cmd = IDM_NEXT_TAB;
     acc[2].fVirt = FVIRTKEY | FCONTROL | FSHIFT; acc[2].key = VK_TAB; acc[2].cmd = IDM_PREV_TAB;
     acc[3].fVirt = FVIRTKEY | FCONTROL;          acc[3].key = 'N';    acc[3].cmd = IDM_FILE_NEWTASK;
     acc[4].fVirt = FVIRTKEY | FCONTROL;          acc[4].key = 'F';    acc[4].cmd = IDM_PROC_FIND;
     acc[5].fVirt = FVIRTKEY | FCONTROL;          acc[5].key = 'P';    acc[5].cmd = IDM_VIEW_TOGGLEPAUSE;
+    acc[6].fVirt = FVIRTKEY | FCONTROL;          acc[6].key = 'B';    acc[6].cmd = IDM_VIEW_BLAME_PEAK;
     return CreateAcceleratorTable(acc, ARRAYSIZE(acc));
 }
 
