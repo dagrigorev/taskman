@@ -31,6 +31,12 @@ dependencies beyond what ships with Windows.
   It moves below the table in smaller windows. Open File Location checks process
   identity before revealing its executable in Explorer; Copy Details copies a
   text summary. Existing end-process safeguards and confirmation remain in place.
+- File > Startup Impact lists every startup entry from the Run registry keys
+  (user, machine and 32-bit machine) and both Startup folders, with whether it is
+  enabled in Windows' own startup settings, how many of its processes are running,
+  and the CPU time and private memory they have used, heaviest first. Go to
+  Process opens the running process; Open file location reveals the executable.
+  Processes that cannot be opened without elevation are not counted.
 - Export CSV captures the current filtered, sorted process snapshot when clicked.
   Files use UTF-8 with a BOM, escaped text fields, numeric byte counts, and empty
   cells for unavailable memory. A completed temporary file replaces the destination

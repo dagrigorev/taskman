@@ -1,6 +1,7 @@
 /* Exercise real windows and controls without writing settings or running tasks. */
 #include "../include/app.h"
 #include "../include/blame.h"
+#include "../include/startup.h"
 #include <stdio.h>
 static void IgnoreSettingsSave(void) {}
 #define Settings_Save IgnoreSettingsSave
@@ -325,6 +326,25 @@ int main(void)
         FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 7, 3);
         CHECK(!lstrcmpW(status, L"  LIVE   |   7 processes   |   3 apps not responding (click to view)"));
     }
+    {
+        /* File > Startup Impact opens one modeless window, fills it with every
+           startup entry this machine has, and a second request reuses it. */
+        static StartupEntry entries[STARTUP_MAX_ENTRIES];
+        HWND first, second;
+        int expected = Startup_ReadEntries(entries, STARTUP_MAX_ENTRIES);
+        CHECK(StartupTest_RowCount() == -1);
+        SendMessageW(hwnd, WM_COMMAND, IDM_FILE_STARTUP, 0);
+        Pump(60);
+        first = FindWindowW(L"ClassicTaskManagerStartupWnd", NULL);
+        CHECK(first != NULL && GetWindow(first, GW_OWNER) == hwnd);
+        CHECK(StartupTest_RowCount() == expected);
+        second = App_ShowStartupImpact(hwnd);
+        CHECK(second == first);
+        if (first) SendMessageW(first, WM_COMMAND, IDCANCEL, 0);
+        Pump(60);
+        CHECK(!IsWindow(first));
+        CHECK(StartupTest_RowCount() == -1);
+    }
     SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
     Capture(hwnd, L"tests/.build/workspace-performance.bmp");
     {
@@ -527,8 +547,14 @@ int main(void)
         /* Only once the selection moves elsewhere does the filter reclaim
            it -- that is what bounds the exemption. */
         ListView_SetItemState(list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_SetItemState(list, 0, LVIS_SELECTED | LVIS_FOCUSED,
-                              LVIS_SELECTED | LVIS_FOCUSED);
+        {
+            /* Any row but System itself: with CPU sorting, System is often
+               row 0, and selecting it would keep the exemption alive. */
+            int other = ListPidAt(list, 0) == 4 ? 1 : 0;
+            CHECK(ListPidAt(list, other) != 4);
+            ListView_SetItemState(list, other, LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+        }
         TabProcesses()->OnSnapshot(TabProcesses()); Pump(60);
         CHECK(ListFindPid(list, 4) < 0);
 
