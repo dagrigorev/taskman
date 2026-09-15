@@ -1032,10 +1032,17 @@ static void ProcCreate(TabPage *p)
     UI_CreateButton(p->hwnd, IDC_PROC_MARK, ProcDiff_IsSet(&s_mark) ? L"Unmark" : L"Mark", 0);
     UI_CreateButton(p->hwnd, IDC_PROC_EXPORT, L"Export CSV", 0);
     s_summary = UI_CreateStatic(p->hwnd, IDC_PROC_SUMMARY, L"Collecting processes...", SS_LEFT);
-    s_details = UI_CreateStatic(p->hwnd, IDC_PROC_DETAILS, L"Process inspector", SS_BLACKRECT);
+    /* The inspector repaints every snapshot, and its two buttons lie on top
+       of it. WS_CLIPSIBLINGS only clips against siblings above it in Z
+       order, and later children start below earlier ones, so it also goes
+       to the bottom; otherwise each repaint draws the card over the buttons. */
+    s_details = UI_CreateStatic(p->hwnd, IDC_PROC_DETAILS, L"Process inspector",
+                                SS_BLACKRECT | WS_CLIPSIBLINGS);
     SetWindowSubclass(s_details, ProcDetailsProc, 81, 0);
     UI_CreateButton(p->hwnd, IDC_PROC_OPENLOCATION, L"Open file location", 0);
     UI_CreateButton(p->hwnd, IDC_PROC_COPY, L"Copy details", 0);
+    if (s_details)
+        SetWindowPos(s_details, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     ProcSelectionChanged();
 }
 
