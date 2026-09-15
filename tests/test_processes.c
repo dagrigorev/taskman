@@ -32,6 +32,19 @@ PFN_NtQuerySystemInformation Nt_QuerySystemInformation(void)
     return noNative ? NULL : (PFN_NtQuerySystemInformation)(void *)
         GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQuerySystemInformation");
 }
+/* Stands in for the collector's shared enumeration. Serves whatever the
+   test staged, once, the way the real one is handed out once per sample. */
+static BYTE *borrowBuf;
+static ULONG borrowUsed;
+static int borrowTakes;
+BOOL Blame_TakeListing(const BYTE **base, ULONG *used)
+{
+    if (!borrowBuf) return FALSE;
+    *base = borrowBuf; *used = borrowUsed;
+    borrowBuf = NULL;
+    ++borrowTakes;
+    return TRUE;
+}
 #include "../src/tabs/tab_processes.c"
 static int failures;
 #define CHECK(x) do { if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); ++failures; } } while (0)
@@ -259,6 +272,106 @@ int main(void)
     CHECK(!ProcMatches(&row, L"", 1));
     CHECK(!ProcMatches(&row, L"", 2));
     {
+        /* "Changed since mark" keeps new and grown rows only, and nothing
+           at all until a mark exists. The summary names what exited. */
+        ProcRow marked[2], now;
+        ProcMarkEntry gone[2];
+        ProcDiffCounts counts;
+        FILETIME wall;
+        SYSTEMTIME st = {0};
+        WCHAR text[512];
+        CHECK(!ProcMatches(&row, L"", 3));
+        ZeroMemory(marked, sizeof(marked));
+        marked[0].pid = 1234; marked[0].createTime = 5;
+        marked[0].privateBytes = 10ULL * 1024 * 1024; marked[0].memoryKnown = TRUE;
+        lstrcpyW(marked[0].imageName, L"Code.exe");
+        marked[1].pid = 77; marked[1].createTime = 1;
+        lstrcpyW(marked[1].imageName, L"gone.exe");
+        st.wYear = 2026; st.wMonth = 9; st.wDay = 15; st.wHour = 12; st.wMinute = 3; st.wSecond = 44;
+        SystemTimeToFileTime(&st, &wall);
+        CHECK(ProcDiff_Take(&s_mark, marked, 2, wall));
+        now = marked[0];
+        CHECK(!ProcMatches(&now, L"", 3));                       /* unchanged */
+        now.privateBytes += PROC_DIFF_GREW_BYTES;
+        CHECK(ProcMatches(&now, L"", 3));                        /* grew */
+        CHECK(!ProcMatches(&now, L"missing", 3));                /* search still applies */
+        now = marked[0]; now.createTime = 6;
+        CHECK(ProcMatches(&now, L"", 3));                        /* new */
+
+        counts.started = 1; counts.exited = 1; counts.grew = 2;
+        gone[0] = s_mark.entries[0];                             /* pid 77 sorts first */
+        ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 1, L"12:03:44");
+        CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: 1 started, 1 exited (gone.exe), 2 grew"));
+        counts.exited = 4;
+        gone[1] = s_mark.entries[1];
+        ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 2, L"12:03:44");
+        CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: 1 started, 4 exited (gone.exe, Code.exe +2 more), 2 grew"));
+        counts.started = counts.exited = counts.grew = 0;
+        ProcMarkSummary(text, ARRAYSIZE(text), &counts, gone, 0, L"12:03:44");
+        CHECK(!lstrcmpW(text, L"  |  Since 12:03:44: no changes"));
+        {
+            /* The inspector's "since mark" value. This fixture's
+               UI_FormatSize prints raw byte counts. */
+            ProcRow grown = marked[0];
+            grown.handles = 300;
+            grown.privateBytes += PROC_DIFF_GREW_BYTES;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"+16777216 private, +300 handles"));
+            grown.privateBytes = 1024;
+            grown.handles = 0;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"-10484736 private, +0 handles"));
+            grown.memoryKnown = FALSE;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"+0 handles"));
+            grown.createTime = 99;
+            ProcMarkDelta(&grown, text, ARRAYSIZE(text));
+            CHECK(!lstrcmpW(text, L"Started after the mark"));
+        }
+        {
+            /* While held, rows keep their last displayed order whatever
+               their values do; unseen rows fall behind, in sort order. */
+            ProcRow a = marked[0], b = marked[0], c = marked[0];
+            ProcTreeInfo ta = {0}, tb = {0};
+            a.pid = 1; a.createTime = 1; a.cpuPct = 1.0f;
+            b.pid = 2; b.createTime = 2; b.cpuPct = 50.0f;
+            c.pid = 3; c.createTime = 3; c.cpuPct = 90.0f;
+            g_sortCol = 2; g_sortDir = -1;
+            PROC_CMP_COL = 2; PROC_CMP_DIR = -1;
+            CHECK(ProcCompare(&b, &a) < 0);              /* busier first, unheld */
+            {
+                ProcRow shown[2];
+                shown[0] = a; shown[1] = b;              /* a was displayed above b */
+                CHECK(ProcOrder_Capture(&s_heldOrder, shown, NULL, 2));
+            }
+            s_holdOrder = TRUE;
+            CHECK(ProcCompare(&a, &b) < 0);
+            CHECK(ProcTreeCompare(&a, &ta, &b, &tb) < 0);
+            CHECK(ProcCompare(&b, &c) < 0);              /* known before unseen */
+            CHECK(ProcCompare(&c, &a) > 0);
+            s_holdOrder = FALSE;
+            CHECK(ProcCompare(&b, &a) < 0);
+            CHECK(ProcTreeCompare(&b, &tb, &a, &ta) < 0);
+            ProcOrder_Free(&s_heldOrder);
+            g_sortCol = 2; g_sortDir = -1;
+            {
+                /* The hold survives moving between the rows and the
+                   scrollbar, and a thumb drag that strays outside, but
+                   not a pointer that has really left. */
+                RECT win = { 100, 100, 400, 300 };
+                POINT inside = { 395, 150 }, outside = { 450, 150 }, edge = { 400, 150 };
+                CHECK(ProcHoldKeeps(inside, &win, FALSE));
+                CHECK(!ProcHoldKeeps(outside, &win, FALSE));
+                CHECK(!ProcHoldKeeps(edge, &win, FALSE));       /* right edge is exclusive */
+                CHECK(ProcHoldKeeps(outside, &win, TRUE));      /* dragging the thumb */
+            }
+        }
+        ProcDiff_Free(&s_mark);
+        ProcMarkDelta(&now, text, ARRAYSIZE(text));
+        CHECK(text[0] == 0);
+        CHECK(!ProcMatches(&now, L"", 3));
+    }
+    {
         WCHAR escaped[128];
         CHECK(ProcCsvField(L"Alice, \"dev\"", escaped, ARRAYSIZE(escaped)));
         CHECK(!wcscmp(escaped, L"\"Alice, \"\"dev\"\"\""));
@@ -315,6 +428,35 @@ int main(void)
         CHECK(found);
     }
     Proc_Reset(); noNative=FALSE;
+    {
+        /* A listing taken from the collector is used as is: with the native
+           query switched off, native counters can only have come from it.
+           The listing is taken once, so the next collection falls back. */
+        static BYTE staged[4 * 1024 * 1024];
+        ULONG needed = 0;
+        int i; BOOL found = FALSE;
+        PFN_NtQuerySystemInformation query = Nt_QuerySystemInformation();
+        CHECK(query && NT_SUCCESS(query(CtmSystemProcessInformation, staged, sizeof(staged), &needed)));
+        noNative = TRUE;
+        borrowBuf = staged; borrowUsed = needed; borrowTakes = 0;
+        Proc_Collect();
+        CHECK(borrowTakes == 1);
+        for (i=0;i<g_sharedCnt;++i) if (g_shared[i].pid==GetCurrentProcessId()) {
+            found = TRUE;
+            CHECK(g_shared[i].countersKnown);
+            CHECK(g_shared[i].memoryKnown);
+        }
+        CHECK(found);
+        Proc_Collect();
+        CHECK(borrowTakes == 1);
+        found = FALSE;
+        for (i=0;i<g_sharedCnt;++i) if (g_shared[i].pid==GetCurrentProcessId()) {
+            found = TRUE;
+            CHECK(!g_shared[i].countersKnown);
+        }
+        CHECK(found);
+        Proc_Reset(); noNative = FALSE;
+    }
     InitCommonControlsEx(&controls);
     parent=CreateWindowExW(0,L"STATIC",L"Process test fixture",0,0,0,100,100,NULL,NULL,GetModuleHandleW(NULL),NULL);
     s_list=CreateWindowExW(0,WC_LISTVIEWW,L"",WS_CHILD|LVS_REPORT|LVS_OWNERDATA,

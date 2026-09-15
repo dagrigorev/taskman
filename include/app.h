@@ -182,7 +182,16 @@ DWORD ProcTest_PendingPid(void);
    blocks on user input, so the fixture cannot reach the menu any other
    way. The caller owns the returned menu. */
 HMENU ProcTest_BuildColumnMenu(void);
+/* Per-CPU grid geometry shared by painting and blame hit testing. */
+void  PerfTest_CellRect(const RECT *rc, UINT cpus, UINT cpu, RECT *cell);
+int   PerfTest_CellAt(const RECT *rc, UINT cpus, int x, int y);
 void Apps_Collect(void);
+/* Background hang watch for the other tabs: same enumeration and hang
+   timing as Apps_Collect, but trusts IsHungAppWindow alone and never
+   messages a window. */
+void Apps_Watch(void);
+/* Windows judged hung by the latest collection or watch. Any thread. */
+int  Apps_HungCount(void);
 void Apps_Reset(void);
 void Svc_Collect(void);
 void Svc_Reset(void);

@@ -17,7 +17,15 @@ dependencies beyond what ships with Windows.
 - Processes: search across image name, description, account and PID. Space-separated
   terms must all match; `pid:1234` matches a PID exactly. Resource filters show
   processes using at least 1% CPU or 100 MB of private memory. Search and sorting
-  still work while sampling is paused.
+  still work while sampling is paused. While the pointer is over the process list or its scrollbar,
+  rows keep their order so they cannot move away before a click; values still
+  refresh, new processes join at the bottom, and the list re-sorts as soon as the
+  pointer leaves or a column header is clicked.
+- Mark takes a snapshot of every process; later, the summary reads
+  `Since 12:03:44: 4 started, 1 exited (backgroundTaskHost.exe), 1 grew`. New
+  processes are tinted green and grown ones amber (16 MB more private memory or
+  256 more handles), and the "Changed since mark" filter shows only those. A
+  reused PID counts as a new process. Unmark clears it.
 - The process inspector shows identity, account, CPU usage, private memory,
   parent PID, thread/handle counts, CPU time and lifetime I/O where available.
   It moves below the table in smaller windows. Open File Location checks process
@@ -31,6 +39,23 @@ dependencies beyond what ships with Windows.
 - CPU/memory graphs use distinct colors; per-processor and kernel-time graph
   options remain available in View. Networking adds sortable receive/send rates
   in B/s, KB/s and larger units alongside utilization and link speed.
+- Spike Blame: hover the CPU or memory history graph to see the five processes
+  using the most CPU or private memory at that moment, with the time of the
+  sample. Processes that have since exited are marked. Click a column to open
+  its busiest still-running process in the Processes tab. Ctrl+B pins the
+  highest CPU sample on screen. Culprits are recorded every sample on every
+  tab, so a spike can be explained after the fact; pausing freezes them along
+  with the graphs. In the per-CPU grid the cursor runs through every core and
+  the header adds the hovered core's load; culprits stay system wide, since
+  Windows does not measure processes per core. Tiny footprint mode does not blame.
+- Applications shows how long a window has been hung, for example
+  `Not Responding (2m 05s)`, and sorts the longest hang first on the Status column.
+  End Task on a hung window offers to end its process, since a hung window cannot
+  process a close request. Go to Process opens the owning process. DWM's ghost
+  copies of hung windows are not listed. A single slow reply is not a hang: a window
+  must miss two samples in a row, or be flagged by Windows itself. On other tabs
+  a lighter watch keeps hang timers running without messaging any window, and
+  the status bar reads `1 app not responding (click to view)`.
 - Alternating table rows, CPU/memory cell shading, styled navigation, and
   scalable fonts and columns make large snapshots easier to scan. PID 0 (idle
   capacity) is excluded from the process table and its resource totals.
@@ -44,6 +69,7 @@ both the header and page controls.
 | --- | --- |
 | Ctrl+F | Open Processes and focus search |
 | Ctrl+P | Pause/resume the previous sampling speed |
+| Ctrl+B | Pin the CPU peak on the Performance tab and show its culprits |
 | Ctrl+N | Run a new task |
 | F5 | Refresh once, including while paused |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next/previous tab |

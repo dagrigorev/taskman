@@ -366,6 +366,34 @@ static void TestAggregateTreatsUnknownGpuAsZero(void)
     CHECK(tree[0].gpuRollup == 3.0f);
 }
 
+/* A held order ranks rows by where they were last displayed. */
+static void TestHeldOrder(void)
+{
+    ProcRow rows[3];
+    ProcHeldOrder held = {0};
+    int order[3] = { 2, 0, 1 };
+    rows[0] = MakeRow(10, 0, 100, 0, 0, FALSE);
+    rows[1] = MakeRow(20, 0, 200, 0, 0, FALSE);
+    rows[2] = MakeRow(30, 0, 300, 0, 0, FALSE);
+
+    CHECK(ProcOrder_Rank(&held, 10, 100) == PROC_RANK_UNKNOWN);
+    CHECK(ProcOrder_Capture(&held, rows, NULL, 3));        /* identity order */
+    CHECK(ProcOrder_Rank(&held, 10, 100) == 0);
+    CHECK(ProcOrder_Rank(&held, 30, 300) == 2);
+
+    CHECK(ProcOrder_Capture(&held, rows, order, 3));       /* replaces */
+    CHECK(ProcOrder_Rank(&held, 30, 300) == 0);
+    CHECK(ProcOrder_Rank(&held, 10, 100) == 1);
+    CHECK(ProcOrder_Rank(&held, 20, 200) == 2);
+    CHECK(ProcOrder_Rank(&held, 20, 999) == PROC_RANK_UNKNOWN);  /* reused pid */
+    CHECK(ProcOrder_Rank(&held, 40, 400) == PROC_RANK_UNKNOWN);
+
+    ProcOrder_Free(&held);
+    CHECK(held.ranks == NULL && held.count == 0);
+    CHECK(ProcOrder_Rank(&held, 30, 300) == PROC_RANK_UNKNOWN);
+    CHECK(!ProcOrder_Capture(&held, rows, NULL, 0));
+}
+
 int main(void)
 {
     CHECK(sizeof(ProcTreeInfo) > 0);
@@ -386,6 +414,7 @@ int main(void)
     TestCollapseSet();
     TestAggregateFoldsGpuLikeCpu();
     TestAggregateTreatsUnknownGpuAsZero();
+    TestHeldOrder();
     printf("proctree: %d failures\n", failures);
     return failures ? 1 : 0;
 }

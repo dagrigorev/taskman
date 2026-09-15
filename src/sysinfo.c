@@ -10,6 +10,7 @@
 #include "ntapi.h"
 #include "gpu.h"
 #include "sensors.h"
+#include "blame.h"
 
 /* --------------------------------------------------------- native API --- */
 
@@ -338,6 +339,10 @@ static DWORD WINAPI CollectorProc(LPVOID param)
 
         HistoryPush((float)back->cpuUsage, (float)back->cpuKernel,
                     (float)back->memUsage);
+        /* Same iteration as HistoryPush, so the ring stays column aligned
+           with the graphs. */
+        Blame_Collect(back->sequence, (float)back->cpuUsage,
+                      (float)back->memUsage);
 
         /* Before the tab collectors: Proc_Collect reads the per-process
            figures, and refreshing them afterwards would leave the Processes
@@ -385,6 +390,7 @@ BOOL SysInfo_Start(HWND notify)
     g_havePrev = FALSE;
     ZeroMemory(g_snap, sizeof(g_snap));
     ZeroMemory(&g_hist, sizeof(g_hist));
+    Blame_Reset();
     g_cpuHistoryCount = g_cpuPreviousCount = g_cpuSampleCount = 0;
     ZeroMemory(g_cpuHistory, sizeof(g_cpuHistory));
     ZeroMemory(g_kernelHistory, sizeof(g_kernelHistory));

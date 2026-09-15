@@ -26,6 +26,7 @@
 #define IDC_APPS_ENDTASK                2001
 #define IDC_APPS_SWITCHTO               2002
 #define IDC_APPS_NEWTASK                2003
+#define IDC_APPS_GOTOPROCESS            2004
 
 /* Processes tab (2100-2199) */
 #define IDC_PROC_LIST                   2100
@@ -39,6 +40,7 @@
 #define IDC_PROC_SUMMARY                2108
 #define IDC_PROC_OPENLOCATION           2109
 #define IDC_PROC_COPY                   2110
+#define IDC_PROC_MARK                   2111
 
 /* Services tab (2200-2299) */
 #define IDC_SVC_LIST                    2200
@@ -129,6 +131,7 @@
 #define IDM_VIEW_TOGGLEPAUSE            40073
 #define IDM_PROC_FIND                   40074
 #define IDM_VIEW_PROCTREE               40075
+#define IDM_VIEW_BLAME_PEAK             40076
 
 /* Processes > Select Columns... popup: one command per toggleable column.
    Reserved range of its own; the popup uses TPM_RETURNCMD, but these must

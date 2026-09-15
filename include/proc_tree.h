@@ -111,4 +111,18 @@ BOOL ProcCollapse_Toggle(ProcCollapseSet *set, DWORD pid, ULONGLONG createTime);
 /* Drops entries whose process is no longer in `rows`. */
 void ProcCollapse_Prune(ProcCollapseSet *set, const ProcRow *rows, int count);
 
+/* ---- held order ---------------------------------------------------------
+   Where each process was last displayed, so the list can stop reordering
+   under the pointer. Keyed by pid and createTime; a reused pid is unseen. */
+#define PROC_RANK_UNKNOWN 0x7fffffff
+
+typedef struct { DWORD pid; ULONGLONG createTime; int rank; } ProcRank;
+typedef struct { ProcRank *ranks; int count; } ProcHeldOrder;
+
+/* Records rows[order[i]] at rank i, or rows[i] when order is NULL,
+   replacing what was held. FALSE, leaving it empty, on no rows or no memory. */
+BOOL ProcOrder_Capture(ProcHeldOrder *held, const ProcRow *rows, const int *order, int count);
+int  ProcOrder_Rank(const ProcHeldOrder *held, DWORD pid, ULONGLONG createTime);
+void ProcOrder_Free(ProcHeldOrder *held);
+
 #endif /* CTM_PROC_TREE_H */

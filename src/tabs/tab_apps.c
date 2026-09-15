@@ -13,12 +13,15 @@ typedef struct {
     HWND  hwnd;
     DWORD pid, tid;
     WCHAR title[APP_TITLE_MAX];
-    BOOL  hung;
+    BOOL  hung;             /* IsHungAppWindow, or slow twice in a row       */
+    BOOL  slow;             /* the WM_NULL probe timed out this sample       */
+    ULONGLONG hungSince;    /* tick the hang was first seen, 0 if responding */
     BOOL  selected;
 } AppRow;
 
 static AppRow  *g_shared;
 static int      g_sharedCnt;
+static ULONGLONG g_sharedTick;  /* collector thread only: when g_shared was taken */
 static SRWLOCK  g_appsLock = SRWLOCK_INIT;
 
 static AppRow  *g_view;
@@ -45,15 +48,63 @@ static int app_compare(const void *va, const void *vb)
 {
     const AppRow *a = va, *b = vb;
     int cmp = app_sortColumn == 1 ? (int)a->hung - (int)b->hung : 0;
+    /* Between two hung windows, the one hung longer ranks as more hung. */
+    if (!cmp && app_sortColumn == 1 && a->hung && a->hungSince != b->hungSince)
+        cmp = a->hungSince < b->hungSince ? 1 : -1;
     if (!cmp) cmp = lstrcmpiW(a->title, b->title);
     if (!cmp) cmp = (UINT_PTR)a->hwnd < (UINT_PTR)b->hwnd ? -1 :
                     (UINT_PTR)a->hwnd > (UINT_PTR)b->hwnd;
     return app_sortDescending ? -cmp : cmp;
 }
 
+/* ------------------------------------------------------ hang tracking --- */
+
+/* Previous samples older than this are not "the sample before": the
+   Applications tab only collects while it is open. */
+#define APP_CONSECUTIVE_MS 5000
+
+/* Decides which rows are hung and stamps when each hang began.
+   IsHungAppWindow already waits five seconds, so it counts at once. A
+   timed-out 10 ms probe is noise under load until the same window, same
+   pid and thread, failed the previous recent sample too. A hang's start
+   carries over from the previous sample; a reused handle starts over. */
+static void app_trackHangs(AppRow *rows, int count, const AppRow *prev, int prevCount,
+                           ULONGLONG prevTick, ULONGLONG now)
+{
+    int i, j;
+    BOOL recent = prev && prevTick && now >= prevTick && now - prevTick <= APP_CONSECUTIVE_MS;
+    for (i = 0; i < count; ++i) {
+        const AppRow *before = NULL;
+        rows[i].hungSince = 0;
+        for (j = 0; recent && j < prevCount; ++j)
+            if (app_same(&rows[i], &prev[j])) { before = &prev[j]; break; }
+        if (!rows[i].hung && rows[i].slow && before && (before->slow || before->hung))
+            rows[i].hung = TRUE;
+        if (!rows[i].hung) continue;
+        rows[i].hungSince = before && before->hung && before->hungSince ? before->hungSince : now;
+    }
+}
+
+static void app_formatStatus(const AppRow *row, ULONGLONG now, WCHAR *buf, size_t cch)
+{
+    ULONGLONG secs;
+    if (!row->hung) { StringCchCopyW(buf, cch, L"Running"); return; }
+    secs = row->hungSince && now > row->hungSince ? (now - row->hungSince) / 1000 : 0;
+    if (secs < 1)
+        StringCchCopyW(buf, cch, L"Not Responding");
+    else if (secs < 60)
+        StringCchPrintfW(buf, cch, L"Not Responding (%us)", (unsigned)secs);
+    else if (secs < 3600)
+        StringCchPrintfW(buf, cch, L"Not Responding (%um %02us)",
+                         (unsigned)(secs / 60), (unsigned)(secs % 60));
+    else
+        StringCchPrintfW(buf, cch, L"Not Responding (%uh %02um)",
+                         (unsigned)(secs / 3600), (unsigned)(secs % 3600 / 60));
+}
+
 /* ------------------------------------------------------ enumeration ----- */
 
-typedef struct { AppRow *buf; int cnt; int cap; ULONGLONG start; BOOL failed; } EnumCtx;
+typedef struct { AppRow *buf; int cnt; int cap; ULONGLONG start; BOOL failed; BOOL noProbe; } EnumCtx;
 
 static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
 {
@@ -73,6 +124,13 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
        result: nobody is going to display it. */
     if (SysInfo_Stopping()) { ctx->failed = TRUE; return FALSE; }
     if (!IsWindowVisible(hwnd)) return TRUE;
+    /* DWM stands a "Ghost" window in for a hung one: same caption, but owned
+       by dwm.exe. The hung window itself is listed, so the ghost would only
+       duplicate it and put DWM's pid behind End Task. */
+    {
+        WCHAR cls[16];
+        if (GetClassNameW(hwnd, cls, ARRAYSIZE(cls)) && !lstrcmpW(cls, L"Ghost")) return TRUE;
+    }
 
     style   = GetWindowLongW(hwnd, GWL_STYLE);
     exStyle = GetWindowLongW(hwnd, GWL_EXSTYLE);
@@ -113,24 +171,32 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
        collector thread, so a hung UI thread of ours is exactly as
        detectable -- and as worth reporting -- as any other application's.
        Only the caption read above avoids messaging our own thread. */
-    if (!row->hung && GetTickCount64() - ctx->start < APP_PROBE_BUDGET_MS) {
+    if (!row->hung && !ctx->noProbe && GetTickCount64() - ctx->start < APP_PROBE_BUDGET_MS) {
         SetLastError(ERROR_SUCCESS);
         if (!SendMessageTimeoutW(hwnd, WM_NULL, 0, 0,
                 SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, 10, &response))
-            row->hung = GetLastError() == ERROR_TIMEOUT;
+            row->slow = GetLastError() == ERROR_TIMEOUT;
     }
     return TRUE;
 }
 
-void Apps_Collect(void)
+static void app_collect(BOOL probe)
 {
     EnumCtx ctx;
     AppRow *old;
 
     ZeroMemory(&ctx, sizeof(ctx));
     ctx.start = GetTickCount64();
+    ctx.noProbe = !probe;
     EnumWindows(EnumTopLevel, (LPARAM)&ctx);
     if (ctx.failed) { free(ctx.buf); return; }
+    /* g_shared is only ever replaced on this thread, so reading it here
+       without the lock is safe. */
+    {
+        ULONGLONG now = GetTickCount64();
+        app_trackHangs(ctx.buf, ctx.cnt, g_shared, g_sharedCnt, g_sharedTick, now);
+        g_sharedTick = now;
+    }
 
     AcquireSRWLockExclusive(&g_appsLock);
     old        = g_shared;
@@ -141,10 +207,29 @@ void Apps_Collect(void)
     free(old);
 }
 
+void Apps_Collect(void)
+{
+    app_collect(TRUE);
+}
+
+void Apps_Watch(void)
+{
+    app_collect(FALSE);
+}
+
+int Apps_HungCount(void)
+{
+    int i, hung = 0;
+    AcquireSRWLockShared(&g_appsLock);
+    for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hung) ++hung;
+    ReleaseSRWLockShared(&g_appsLock);
+    return hung;
+}
+
 void Apps_Reset(void)
 {
     AcquireSRWLockExclusive(&g_appsLock);
-    free(g_shared); g_shared = NULL; g_sharedCnt = 0;
+    free(g_shared); g_shared = NULL; g_sharedCnt = 0; g_sharedTick = 0;
     ReleaseSRWLockExclusive(&g_appsLock);
 
     free(g_view); g_view = NULL; g_viewCnt = 0;
@@ -157,7 +242,7 @@ static void AppsCreate(TabPage *p)
     s_list = UI_CreateListView(p->hwnd, IDC_APPS_LIST, LVS_SHAREIMAGELISTS);
     if (s_list) {
         UI_AddColumn(s_list, 0, L"Task",   150, LVCFMT_LEFT);
-        UI_AddColumn(s_list, 1, L"Status",  60, LVCFMT_LEFT);
+        UI_AddColumn(s_list, 1, L"Status", 110, LVCFMT_LEFT);
         app_smallIcons = ImageList_Create(GetSystemMetrics(SM_CXSMICON),
             GetSystemMetrics(SM_CYSMICON), ILC_COLOR32 | ILC_MASK, 32, 32);
         app_largeIcons = ImageList_Create(GetSystemMetrics(SM_CXICON),
@@ -169,13 +254,14 @@ static void AppsCreate(TabPage *p)
     }
     UI_CreateButton(p->hwnd, IDC_APPS_ENDTASK,  L"&End Task",    0);
     UI_CreateButton(p->hwnd, IDC_APPS_SWITCHTO, L"&Switch To",   0);
+    UI_CreateButton(p->hwnd, IDC_APPS_GOTOPROCESS, L"&Go to Process", 0);
     UI_CreateButton(p->hwnd, IDC_APPS_NEWTASK,  L"&New Task...", 0);
 }
 
 static void AppsLayout(TabPage *p, int cx, int cy, BOOL tiny)
 {
     static const int buttons[] = {
-        IDC_APPS_ENDTASK, IDC_APPS_SWITCHTO, IDC_APPS_NEWTASK
+        IDC_APPS_ENDTASK, IDC_APPS_SWITCHTO, IDC_APPS_GOTOPROCESS, IDC_APPS_NEWTASK
     };
     int margin = UI_Margin(p->hwnd);
     SIZE bs = UI_ButtonSize(p->hwnd);
@@ -213,6 +299,8 @@ static void app_render(void)
 {
     int i;
     BOOL focused = FALSE;
+    ULONGLONG now = GetTickCount64();
+    WCHAR status[64];
     if (g_viewCnt > 1) qsort(g_view, (size_t)g_viewCnt, sizeof(*g_view), app_compare);
     if (s_list) {
         LVITEMW item;
@@ -241,8 +329,8 @@ static void app_render(void)
             item.iSubItem = 0;
             item.pszText  = g_view[i].title;
             ListView_InsertItem(s_list, &item);
-            ListView_SetItemText(s_list, i, 1,
-                UI_Str(g_view[i].hung ? L"Not Responding" : L"Running"));
+            app_formatStatus(&g_view[i], now, status, ARRAYSIZE(status));
+            ListView_SetItemText(s_list, i, 1, status);
             if (g_view[i].selected) {
                 ListView_SetItemState(s_list, i, LVIS_SELECTED | (focused ? 0 : LVIS_FOCUSED),
                     LVIS_SELECTED | LVIS_FOCUSED);
@@ -393,10 +481,35 @@ static void AppsCommand(TabPage *p, int id, int code, HWND ctl)
         app_activate(p, TRUE);
         break;
 
+    case IDC_APPS_GOTOPROCESS: {
+        AppRow row;
+        if (app_selected(&row) && app_validate(p->hwnd, &row))
+            App_ShowProcess(row.pid);
+        break;
+    }
+
     case IDC_APPS_ENDTASK: {
         AppRow row;
         WCHAR question[APP_TITLE_MAX + 128];
-        if (app_selected(&row) && app_validate(p->hwnd, &row)) {
+        BOOL ok = app_selected(&row) && app_validate(p->hwnd, &row);
+        if (ok && row.hung) {
+            /* A hung window never pumps the WM_CLOSE below, so asking it
+               to close would silently do nothing. End the process. */
+            StringCchPrintfW(question, ARRAYSIZE(question),
+                L"\"%s\" is not responding and cannot be asked to close.\n\n"
+                L"End its process? Unsaved work will be lost.", row.title);
+            if (MessageBoxW(p->hwnd, question, L"End Task", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES &&
+                app_validate(p->hwnd, &row)) {
+                HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, row.pid);
+                if (!process)
+                    App_ReportError(p->hwnd, L"End process", GetLastError());
+                else {
+                    if (!TerminateProcess(process, 1))
+                        App_ReportError(p->hwnd, L"End process", GetLastError());
+                    CloseHandle(process);
+                }
+            }
+        } else if (ok) {
             StringCchPrintfW(question, ARRAYSIZE(question),
                 L"Close \"%s\"? Unsaved work may be lost.", row.title);
             if (MessageBoxW(p->hwnd, question, L"End Task", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES &&

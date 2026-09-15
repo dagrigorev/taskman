@@ -1,5 +1,6 @@
 /* Exercise real windows and controls without writing settings or running tasks. */
 #include "../include/app.h"
+#include "../include/blame.h"
 #include <stdio.h>
 static void IgnoreSettingsSave(void) {}
 #define Settings_Save IgnoreSettingsSave
@@ -299,8 +300,76 @@ int main(void)
     Capture(hwnd, L"tests/.build/workspace-sensors.bmp");
     SwitchToTab(TAB_PROCESSES, FALSE); Pump(60);
     CHECK(!Gpu_IsEnabled());
+    {
+        /* The left status part calls out hung applications on every tab. */
+        WCHAR status[160];
+        FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 42, 0);
+        CHECK(!lstrcmpW(status, L"  LIVE   |   42 processes   |   F5 refresh   Ctrl+F search"));
+        FormatStatusLeft(status, ARRAYSIZE(status), TRUE, 42, 1);
+        CHECK(!lstrcmpW(status, L"  PAUSED   |   42 processes   |   1 app not responding (click to view)"));
+        FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 7, 3);
+        CHECK(!lstrcmpW(status, L"  LIVE   |   7 processes   |   3 apps not responding (click to view)"));
+    }
     SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
     Capture(hwnd, L"tests/.build/workspace-performance.bmp");
+    {
+        /* Spike Blame: hover and pin draw over the graphs, and a click on
+           the memory graph jumps to its biggest culprit still running. The
+           memory list is used because it is never empty, unlike CPU on an
+           idle machine. */
+        HWND memGraph = GetDlgItem(TabPerformance()->hwnd, IDC_PERF_MEMHISTORY);
+        HWND cpuGraph = GetDlgItem(TabPerformance()->hwnd, IDC_PERF_CPUHISTORY);
+        BlameSample latest;
+        RECT client;
+        LPARAM right;
+        Pump(1500);
+        CHECK(Blame_Copy(&latest, 1) == 1);
+        CHECK(latest.memCount > 0);
+        CHECK(memGraph && cpuGraph);
+        SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_BLAME_PEAK, 0);
+        Pump(60);
+        CHECK(g_active == TAB_PERFORMANCE);
+        Capture(hwnd, L"tests/.build/workspace-blame-pin.bmp");
+
+        GetClientRect(memGraph, &client);
+        right = MAKELPARAM(client.right - 2, client.bottom / 2);
+        /* No hover capture: the fixture sits off screen, so TrackMouseEvent
+           reports the leave at once and the overlay is gone before a
+           capture could see it. The click path does not depend on hover. */
+        SendMessageW(memGraph, WM_MOUSEMOVE, 0, right);
+        SendMessageW(memGraph, WM_LBUTTONUP, 0, right);
+        Pump(60);
+        CHECK(g_active == TAB_PROCESSES);
+        SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
+
+        /* Per-CPU grid: Ctrl+B pins without leaving the grid, and a click
+           on the gutter between two cells names no sample, so it must not
+           switch tabs. */
+        g_cfg.perfOneGraphPerCpu = TRUE;
+        InvalidateRect(cpuGraph, NULL, FALSE);
+        SendMessageW(hwnd, WM_COMMAND, IDM_VIEW_BLAME_PEAK, 0);
+        Pump(60);
+        CHECK(g_cfg.perfOneGraphPerCpu);
+        Capture(hwnd, L"tests/.build/workspace-blame-grid.bmp");
+        {
+            UINT cpus = SysInfo_CpuHistoryCount();
+            GetClientRect(cpuGraph, &client);
+            if (cpus > 1) {
+                RECT cell;
+                LPARAM gutter;
+                PerfTest_CellRect(&client, cpus, 0, &cell);
+                gutter = MAKELPARAM(cell.right, cell.top + 1);   /* right is exclusive */
+                CHECK(PerfTest_CellAt(&client, cpus, cell.left + 1, cell.top + 1) == 0);
+                CHECK(PerfTest_CellAt(&client, cpus, cell.right, cell.top + 1) == -1);
+                CHECK(PerfTest_CellAt(&client, cpus, -1, 0) == -1);
+                SendMessageW(cpuGraph, WM_MOUSEMOVE, 0, gutter);
+                SendMessageW(cpuGraph, WM_LBUTTONUP, 0, gutter);
+                Pump(60);
+                CHECK(g_active == TAB_PERFORMANCE);
+            }
+        }
+        g_cfg.perfOneGraphPerCpu = FALSE;
+    }
     SwitchToTab(TAB_PROCESSES, FALSE);
     /* Clear the search before the GPU column check: a filtered list can be
        a single process that genuinely uses no GPU, which would make the

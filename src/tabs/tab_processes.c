@@ -9,7 +9,9 @@
 #include <wctype.h>
 #include "ui.h"
 #include "proc_tree.h"
+#include "proc_diff.h"
 #include "gpu.h"
+#include "blame.h"
 
 #define PROC_COL_GPU 6
 
@@ -19,6 +21,11 @@
 static BYTE      *s_ntBuf;
 static ULONG      s_ntBufSz;
 static ULONG      s_ntUsed;
+/* The listing Proc_Collect walks: the collector's shared enumeration when
+   one was available this sample, otherwise s_ntBuf. Bounds checks use
+   these, never s_ntBuf directly. */
+static const BYTE *s_listBase;
+static ULONG       s_listUsed;
 
 typedef struct { DWORD pid; ULONGLONG createTime; ULONGLONG kernel; ULONGLONG user; } PrevCpu;
 static PrevCpu   *s_prev;
@@ -91,9 +98,14 @@ static HWND  s_endProcess;
 static HWND  s_search, s_filter, s_details, s_summary;
 static WCHAR s_query[256];
 static int s_filterMode;
+#define PROC_FILTER_CHANGED 3   /* "Changed since mark"                    */
+/* UI thread only. Taken from every collected process, not just the visible
+   ones, so toggling "all users" later does not read as starts and exits. */
+static ProcMark s_mark;
 static BOOL s_refreshing;
 
 static void ProcSnapshot(TabPage *p);
+static WCHAR s_markText[400];   /* summary segment, rebuilt each snapshot   */
 static void ProcCommand(TabPage *p, int id, int code, HWND ctl);
 
 /* Every term must match a field; pid: is deliberately exact. */
@@ -102,6 +114,8 @@ static BOOL ProcMatches(const ProcRow *row, const WCHAR *query, int filter)
     WCHAR token[256], pid[24];
     if (filter == 1 && row->cpuPct < 1.0f) return FALSE;
     if (filter == 2 && (!row->memoryKnown || row->privateBytes < 100ULL * 1024 * 1024)) return FALSE;
+    if (filter == PROC_FILTER_CHANGED &&
+        ProcDiff_Classify(&s_mark, row, NULL, NULL) == PROC_CHANGE_NONE) return FALSE;
     StringCchPrintfW(pid, ARRAYSIZE(pid), L"%lu", (unsigned long)row->pid);
     while (*query) {
         size_t len = 0;
@@ -207,6 +221,8 @@ static const CTM_SYSTEM_PROCESS_INFORMATION *ProcToolhelp(void)
     s_ntBuf = (BYTE *)records;
     s_ntBufSz = (ULONG)(capacity * sizeof(*records));
     s_ntUsed = (ULONG)(count * sizeof(*records));
+    s_listBase = s_ntBuf;
+    s_listUsed = s_ntUsed;
     return (const CTM_SYSTEM_PROCESS_INFORMATION *)s_ntBuf;
 failed:
     CloseHandle(snapshot);
@@ -221,6 +237,17 @@ static const CTM_SYSTEM_PROCESS_INFORMATION *NtEnumProcesses(void)
     ULONG needed = 0;
     int attempts;
 
+    /* Blame_Collect already enumerated on this thread moments ago. */
+    {
+        const BYTE *shared;
+        ULONG used;
+        if (Blame_TakeListing(&shared, &used)) {
+            s_listBase = shared;
+            s_listUsed = used;
+            return (const CTM_SYSTEM_PROCESS_INFORMATION *)shared;
+        }
+    }
+
     if (!pfn) return NULL;
 
     if (!s_ntBuf) {
@@ -233,6 +260,8 @@ static const CTM_SYSTEM_PROCESS_INFORMATION *NtEnumProcesses(void)
         status = pfn(CtmSystemProcessInformation, s_ntBuf, s_ntBufSz, &needed);
         if (NT_SUCCESS(status)) {
             s_ntUsed = needed;
+            s_listBase = s_ntBuf;
+            s_listUsed = needed;
             return needed >= sizeof(CTM_SYSTEM_PROCESS_INFORMATION) && needed <= s_ntBufSz
                 ? (const CTM_SYSTEM_PROCESS_INFORMATION *)s_ntBuf : NULL;
         }
@@ -411,9 +440,9 @@ void Proc_Collect(void)
 
         if (entry->ImageName.Buffer && entry->ImageName.Length > 0 &&
             !(entry->ImageName.Length % sizeof(WCHAR)) &&
-            (ULONG_PTR)entry->ImageName.Buffer >= (ULONG_PTR)s_ntBuf &&
-            (ULONG_PTR)entry->ImageName.Buffer <= (ULONG_PTR)s_ntBuf + s_ntUsed &&
-            entry->ImageName.Length <= (ULONG_PTR)s_ntBuf + s_ntUsed - (ULONG_PTR)entry->ImageName.Buffer) {
+            (ULONG_PTR)entry->ImageName.Buffer >= (ULONG_PTR)s_listBase &&
+            (ULONG_PTR)entry->ImageName.Buffer <= (ULONG_PTR)s_listBase + s_listUsed &&
+            entry->ImageName.Length <= (ULONG_PTR)s_listBase + s_listUsed - (ULONG_PTR)entry->ImageName.Buffer) {
             USHORT len = entry->ImageName.Length / sizeof(WCHAR);
             if (len >= PROC_IMAGE_MAX) len = PROC_IMAGE_MAX - 1;
             memcpy(row->imageName, entry->ImageName.Buffer, len * sizeof(WCHAR));
@@ -476,7 +505,7 @@ void Proc_Collect(void)
 
         if (!entry->NextEntryOffset) break;
         {
-            size_t remaining = s_ntUsed - (size_t)((const BYTE *)entry - s_ntBuf);
+            size_t remaining = s_listUsed - (size_t)((const BYTE *)entry - s_listBase);
             if (entry->NextEntryOffset < sizeof(*entry) ||
                 entry->NextEntryOffset > remaining || remaining - entry->NextEntryOffset < sizeof(*entry))
                 goto failed;
@@ -508,6 +537,7 @@ failed:
 void Proc_Reset(void)
 {
     free(s_ntBuf);   s_ntBuf = NULL;  s_ntBufSz = 0;
+    s_listBase = NULL; s_listUsed = 0;
     free(s_prev);    s_prev  = NULL;  s_prevCnt = 0; s_prevCap = 0;
     s_prevTick    = 0;
     s_userCacheLen = 0; s_userCacheNext = 0; s_pendingPid = 0;
@@ -530,11 +560,37 @@ void Proc_Reset(void)
 static int PROC_CMP_COL;
 static int PROC_CMP_DIR;
 
+/* While the pointer is over the list, rows keep the order they were last
+   shown in, so a row cannot move away between aiming and clicking. Values
+   still refresh; processes not shown before fall in behind, sorted. */
+static BOOL          s_holdOrder;
+static ProcHeldOrder s_heldOrder;
+
+static BOOL s_trackClient, s_trackNonClient;
+
+/* Whether a hold should continue: the pointer is still over any part of the
+   list, rows or scrollbar, or a button is down (a thumb drag may stray). */
+static BOOL ProcHoldKeeps(POINT cursor, const RECT *window, BOOL buttonDown)
+{
+    return buttonDown || PtInRect(window, cursor);
+}
+
+/* Rank comparison for a held order, 0 when not holding or both unseen. */
+static int ProcHeldCompare(const ProcRow *ra, const ProcRow *rb)
+{
+    int a, b;
+    if (!s_holdOrder) return 0;
+    a = ProcOrder_Rank(&s_heldOrder, ra->pid, ra->createTime);
+    b = ProcOrder_Rank(&s_heldOrder, rb->pid, rb->createTime);
+    return (a > b) - (a < b);
+}
+
 static int ProcCompare(const void *a, const void *b)
 {
     const ProcRow *ra = (const ProcRow *)a;
     const ProcRow *rb = (const ProcRow *)b;
-    int cmp = 0;
+    int cmp = ProcHeldCompare(ra, rb);
+    if (cmp) return cmp;
     switch (PROC_CMP_COL) {
     case 0: cmp = lstrcmpiW(ra->imageName, rb->imageName); break;
     case 1: cmp = lstrcmpiW(ra->userName,  rb->userName);  break;
@@ -561,7 +617,8 @@ static int ProcTreeCompare(const ProcRow *ra, const ProcTreeInfo *ta,
     float gb = tb->collapsed ? tb->gpuRollup : rb->gpuPct;
     ULONGLONG ma = ta->collapsed ? ta->memRollup : ra->privateBytes;
     ULONGLONG mb = tb->collapsed ? tb->memRollup : rb->privateBytes;
-    int cmp = 0;
+    int cmp = ProcHeldCompare(ra, rb);
+    if (cmp) return cmp;
 
     switch (g_sortCol) {
     case 0: cmp = lstrcmpiW(ra->imageName, rb->imageName); break;
@@ -760,6 +817,81 @@ static void ProcDetailLine(HDC dc, int x, int y, int width, const WCHAR *label, 
     UI_Text(dc, value, r, 1, UI_INK, DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+/* How the row moved since the mark, or an empty string with no mark. */
+static void ProcMarkDelta(const ProcRow *row, WCHAR *buf, size_t cch)
+{
+    LONGLONG mem;
+    LONG handles;
+    WCHAR size[48];
+    buf[0] = 0;
+    if (!ProcDiff_IsSet(&s_mark)) return;
+    if (ProcDiff_Classify(&s_mark, row, &mem, &handles) == PROC_CHANGE_NEW) {
+        StringCchCopyW(buf, cch, L"Started after the mark");
+        return;
+    }
+    if (row->memoryKnown && mem != 0) {
+        UI_FormatSize((ULONGLONG)(mem < 0 ? -mem : mem), size, ARRAYSIZE(size));
+        StringCchPrintfW(buf, cch, L"%c%s private, ", mem < 0 ? L'-' : L'+', size);
+    } else if (row->memoryKnown) {
+        StringCchCopyW(buf, cch, L"+0 private, ");
+    }
+    {
+        size_t len = (size_t)lstrlenW(buf);
+        StringCchPrintfW(buf + len, cch - len, L"%c%ld handles",
+                         handles < 0 ? L'-' : L'+', (long)(handles < 0 ? -handles : handles));
+    }
+}
+
+/* Ends a hold once the pointer is really gone, and catches up on the order
+   at once rather than on the next tick. */
+static void ProcHoldCheck(HWND list, TabPage *p)
+{
+    POINT cursor;
+    RECT window;
+    if (!s_holdOrder || !list) return;
+    if (GetCursorPos(&cursor) && GetWindowRect(list, &window) &&
+        ProcHoldKeeps(cursor, &window, GetKeyState(VK_LBUTTON) < 0))
+        return;
+    s_holdOrder = FALSE;
+    ProcSnapshot(p);
+}
+
+static LRESULT CALLBACK ProcListHoverProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR id, DWORD_PTR ref)
+{
+    switch (msg) {
+    case WM_MOUSEMOVE:
+    case WM_NCMOUSEMOVE: {
+        /* Rows and scrollbar are tracked separately: Windows reports
+           leaving each one on its own. */
+        BOOL nonClient = msg == WM_NCMOUSEMOVE;
+        BOOL *tracked = nonClient ? &s_trackNonClient : &s_trackClient;
+        if (!*tracked) {
+            TRACKMOUSEEVENT tme;
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE | (nonClient ? TME_NONCLIENT : 0);
+            tme.hwndTrack = hwnd;
+            tme.dwHoverTime = 0;
+            *tracked = TrackMouseEvent(&tme);
+        }
+        if (*tracked) s_holdOrder = TRUE;
+        break;
+    }
+    case WM_MOUSELEAVE:
+    case WM_NCMOUSELEAVE:
+        if (msg == WM_MOUSELEAVE) s_trackClient = FALSE; else s_trackNonClient = FALSE;
+        ProcHoldCheck(hwnd, (TabPage *)ref);
+        break;
+    case WM_NCDESTROY:
+        s_holdOrder = s_trackClient = s_trackNonClient = FALSE;
+        RemoveWindowSubclass(hwnd, ProcListHoverProc, id);
+        break;
+    default:
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 static void ProcDrawDetails(HWND hwnd, HDC dc)
 {
     RECT rc, r;
@@ -793,6 +925,9 @@ static void ProcDrawDetails(HWND hwnd, HDC dc)
         ProcDetailLine(dc, rc.right / 3 + pad, DPX(36), rc.right / 6, L"CPU", value);
         ProcDetailLine(dc, rc.right / 2 + pad, DPX(36), rc.right / 5, L"PRIVATE MEMORY", other);
         ProcDetailLine(dc, rc.right / 3 + pad, DPX(83), rc.right / 3 - pad, L"ACCOUNT", row->userName);
+        ProcMarkDelta(row, value, ARRAYSIZE(value));
+        if (value[0])
+            ProcDetailLine(dc, rc.right * 2 / 3 + pad, DPX(83), rc.right / 3 - 2 * pad, L"SINCE MARK", value);
         return;
     }
     y = DPX(130);
@@ -804,6 +939,13 @@ static void ProcDrawDetails(HWND hwnd, HDC dc)
     if (row->countersKnown) StringCchPrintfW(value, ARRAYSIZE(value), L"%lu / %lu", (unsigned long)row->threads, (unsigned long)row->handles);
     else lstrcpyW(value, L"Unavailable");
     ProcDetailLine(dc, pad, y, width, L"THREADS / HANDLES", value);
+    ProcMarkDelta(row, value, ARRAYSIZE(value));
+    if (value[0] && rc.bottom > DPX(390)) {
+        /* Takes the next slot; the lifetime lines below need more room. */
+        y += DPX(57);
+        ProcDetailLine(dc, pad, y, width, L"SINCE MARK", value);
+        rc.bottom -= DPX(57);
+    }
     if (rc.bottom > DPX(390)) {
         y += DPX(57);
         if (row->createTime) StringCchPrintfW(value, ARRAYSIZE(value), L"%llu:%02llu:%02llu",
@@ -849,6 +991,7 @@ static LRESULT CALLBACK ProcDetailsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 static void ProcCreate(TabPage *p)
 {
     s_list = UI_CreateListView(p->hwnd, IDC_PROC_LIST, LVS_OWNERDATA);
+    if (s_list) SetWindowSubclass(s_list, ProcListHoverProc, 82, (DWORD_PTR)p);
     if (s_list) {
         UI_AddColumn(s_list, 0, L"Process name",                   105, LVCFMT_LEFT);
         UI_AddColumn(s_list, 1, L"User Name",                      60, LVCFMT_LEFT);
@@ -883,8 +1026,10 @@ static void ProcCreate(TabPage *p)
     SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"All resource usage");
     SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"Active CPU (1%+)");
     SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"Memory (100 MB+)");
+    SendMessageW(s_filter, CB_ADDSTRING, 0, (LPARAM)L"Changed since mark");
     SendMessageW(s_filter, CB_SETCURSEL, 0, 0);
     UI_CreateButton(p->hwnd, IDC_PROC_CLEAR, L"Clear", 0);
+    UI_CreateButton(p->hwnd, IDC_PROC_MARK, ProcDiff_IsSet(&s_mark) ? L"Unmark" : L"Mark", 0);
     UI_CreateButton(p->hwnd, IDC_PROC_EXPORT, L"Export CSV", 0);
     s_summary = UI_CreateStatic(p->hwnd, IDC_PROC_SUMMARY, L"Collecting processes...", SS_LEFT);
     s_details = UI_CreateStatic(p->hwnd, IDC_PROC_DETAILS, L"Process inspector", SS_BLACKRECT);
@@ -902,7 +1047,7 @@ static void ProcLayout(TabPage *p, int cx, int cy, BOOL tiny)
     int listBottom, listTop = DPX(75), detailX, detailY, detailW, detailH;
     BOOL side = cx >= DPX(1020) && cy - 2 * margin - bs.cy - listTop >= DPX(340);
     BOOL showDetails = cy >= DPX(340);
-    static const int extra[] = {IDC_PROC_SEARCH, IDC_PROC_FILTER, IDC_PROC_CLEAR, IDC_PROC_EXPORT,
+    static const int extra[] = {IDC_PROC_SEARCH, IDC_PROC_FILTER, IDC_PROC_CLEAR, IDC_PROC_MARK, IDC_PROC_EXPORT,
         IDC_PROC_DETAILS, IDC_PROC_SUMMARY, IDC_PROC_OPENLOCATION, IDC_PROC_COPY};
     int i;
 
@@ -922,10 +1067,11 @@ static void ProcLayout(TabPage *p, int cx, int cy, BOOL tiny)
     }
 
     {
-        int searchW = cx - 2 * margin - DPX(365);
+        int searchW = cx - 2 * margin - DPX(445);
         MoveWindow(s_search, margin, margin, searchW, DPX(30), TRUE);
         MoveWindow(s_filter, margin + searchW + DPX(10), margin + DPX(2), DPX(175), DPX(200), TRUE);
-        MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_CLEAR), cx - margin - DPX(170), margin, DPX(60), DPX(30), TRUE);
+        MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_CLEAR), cx - margin - DPX(250), margin, DPX(60), DPX(30), TRUE);
+        MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_MARK), cx - margin - DPX(180), margin, DPX(70), DPX(30), TRUE);
         MoveWindow(GetDlgItem(p->hwnd, IDC_PROC_EXPORT), cx - margin - DPX(100), margin, DPX(100), DPX(30), TRUE);
         MoveWindow(s_summary, margin, margin + DPX(40), cx - 2 * margin, DPX(20), TRUE);
     }
@@ -958,6 +1104,64 @@ static void ProcLayout(TabPage *p, int cx, int cy, BOOL tiny)
     UI_PlaceButtonRow(p->hwnd, buttons, (int)ARRAYSIZE(buttons), cx, cy);
 }
 
+/* The summary's mark segment: counts, and the first exited names. */
+static void ProcMarkSummary(WCHAR *buf, size_t cch, const ProcDiffCounts *counts,
+                            const ProcMarkEntry *exited, int shown, const WCHAR *when)
+{
+    int i;
+    if (!counts->started && !counts->exited && !counts->grew) {
+        StringCchPrintfW(buf, cch, L"  |  Since %s: no changes", when);
+        return;
+    }
+    StringCchPrintfW(buf, cch, L"  |  Since %s: %d started, ", when, counts->started);
+    if (counts->exited < 0) {
+        StringCchCatW(buf, cch, L"exits unknown");
+    } else {
+        size_t len = (size_t)lstrlenW(buf);
+        StringCchPrintfW(buf + len, cch - len, L"%d exited", counts->exited);
+        if (shown > counts->exited) shown = counts->exited;
+        for (i = 0; i < shown; ++i) {
+            StringCchCatW(buf, cch, i ? L", " : L" (");
+            StringCchCatW(buf, cch, exited[i].imageName);
+        }
+        if (shown > 0) {
+            if (counts->exited > shown) {
+                len = (size_t)lstrlenW(buf);
+                StringCchPrintfW(buf + len, cch - len, L" +%d more", counts->exited - shown);
+            }
+            StringCchCatW(buf, cch, L")");
+        }
+    }
+    {
+        size_t len = (size_t)lstrlenW(buf);
+        StringCchPrintfW(buf + len, cch - len, L", %d grew", counts->grew);
+    }
+}
+
+static void ProcToggleMark(TabPage *p)
+{
+    HWND button = p ? GetDlgItem(p->hwnd, IDC_PROC_MARK) : NULL;
+    if (ProcDiff_IsSet(&s_mark)) {
+        ProcDiff_Free(&s_mark);
+        if (s_filterMode == PROC_FILTER_CHANGED) {
+            s_filterMode = 0;
+            if (s_filter) SendMessageW(s_filter, CB_SETCURSEL, 0, 0);
+        }
+    } else {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        AcquireSRWLockShared(&g_procLock);
+        if (!ProcDiff_Take(&s_mark, g_shared, g_sharedCnt, now) && g_sharedCnt > 0) {
+            ReleaseSRWLockShared(&g_procLock);
+            App_ReportError(p ? p->hwnd : NULL, L"Mark processes", ERROR_NOT_ENOUGH_MEMORY);
+            return;
+        }
+        ReleaseSRWLockShared(&g_procLock);
+    }
+    if (button) SetWindowTextW(button, ProcDiff_IsSet(&s_mark) ? L"Unmark" : L"Mark");
+    ProcSnapshot(p);
+}
+
 static void ProcSnapshot(TabPage *p)
 {
     DWORD selPid = 0;
@@ -967,6 +1171,16 @@ static void ProcSnapshot(TabPage *p)
     BOOL requestedSelection = s_pendingPid != 0;
 
     (void)p;
+
+    /* A leave can go unreported, for instance when a thumb drag ends outside
+       the list, so each snapshot re-checks before it sorts. */
+    if (s_holdOrder && s_list) {
+        POINT cursor;
+        RECT window;
+        if (GetCursorPos(&cursor) && GetWindowRect(s_list, &window) &&
+            !ProcHoldKeeps(cursor, &window, GetKeyState(VK_LBUTTON) < 0))
+            s_holdOrder = FALSE;
+    }
 
     /* remember selection */
     if (s_list && g_viewCnt > 0) {
@@ -993,6 +1207,23 @@ static void ProcSnapshot(TabPage *p)
         if (g_sharedCnt && !newView) { ReleaseSRWLockShared(&g_procLock); return; }
         ReleaseSRWLockShared(&g_procLock);
 
+        /* Against every collected process, before any visibility filter. */
+        s_markText[0] = 0;
+        if (ProcDiff_IsSet(&s_mark)) {
+            ProcDiffCounts counts;
+            ProcMarkEntry exited[3];
+            FILETIME local;
+            SYSTEMTIME st;
+            WCHAR when[16] = L"mark";
+            ProcDiff_Count(&s_mark, newView, newCnt, &counts, exited, (int)ARRAYSIZE(exited));
+            if (FileTimeToLocalFileTime(&s_mark.wallTime, &local) && FileTimeToSystemTime(&local, &st))
+                StringCchPrintfW(when, ARRAYSIZE(when), L"%02u:%02u:%02u", st.wHour, st.wMinute, st.wSecond);
+            ProcMarkSummary(s_markText, ARRAYSIZE(s_markText), &counts, exited,
+                            counts.exited < (int)ARRAYSIZE(exited) ? counts.exited : (int)ARRAYSIZE(exited), when);
+        } else if (s_filterMode == PROC_FILTER_CHANGED) {
+            StringCchCopyW(s_markText, ARRAYSIZE(s_markText), L"  |  Press Mark first, then look again later");
+        }
+
         free(g_view);
         g_view    = newView;
         g_viewCnt = newCnt;
@@ -1009,7 +1240,7 @@ static void ProcSnapshot(TabPage *p)
     }
     {
         int kept = 0, total = g_viewCnt;
-        WCHAR summary[256];
+        WCHAR summary[640];
         double cpu = 0; ULONGLONG memory = 0;
         WCHAR size[48];
         BOOL treeBuilt = FALSE;
@@ -1064,9 +1295,15 @@ static void ProcSnapshot(TabPage *p)
         UI_FormatSize(memory, size, ARRAYSIZE(size));
         StringCchPrintfW(summary, ARRAYSIZE(summary),
             L"%d of %d processes  |  %.1f%% CPU  |  %s private memory%s", kept, total, cpu, size,
+            s_markText[0] ? s_markText :
             kept == 0 ? L"  |  No matches - try clearing your filters" : L"  |  Click a column to sort");
         if (s_summary) SetWindowTextW(s_summary, summary);
     }
+
+    /* Remember what is about to be shown, so a hold that starts before the
+       next snapshot freezes exactly this order. */
+    if (g_tree) ProcOrder_Capture(&s_heldOrder, g_view, g_ordered, g_orderedCnt);
+    else        ProcOrder_Capture(&s_heldOrder, g_view, NULL, g_viewCnt);
 
     if (s_list) {
         s_refreshing = TRUE;
@@ -1168,6 +1405,16 @@ static void ProcToggleCollapse(TabPage *p, int display)
         }
     }
     ProcSnapshot(p);
+}
+
+/* Name-cell tint for a row that started or grew since the mark. */
+static COLORREF ProcChangeTint(const ProcRow *row, COLORREF base)
+{
+    switch (ProcDiff_Classify(&s_mark, row, NULL, NULL)) {
+    case PROC_CHANGE_NEW:  return RGB(222, 245, 228);
+    case PROC_CHANGE_GREW: return RGB(255, 236, 204);
+    default:               return base;
+    }
 }
 
 static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
@@ -1274,6 +1521,7 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
                    then let the theme overlay the selected/hot state exactly
                    as it does for columns 1-5. Falls back to the old
                    hand-painted colors when unthemed (classic mode). */
+                back = ProcChangeTint(&g_view[index], back);
                 UI_Fill(draw->nmcd.hdc, &cell, back);
                 if (themeState != LISS_NORMAL) {
                     if (!s_listTheme || FAILED(DrawThemeBackground(s_listTheme, draw->nmcd.hdc,
@@ -1321,7 +1569,9 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
 
             if (index >= 0 && index < g_viewCnt) {
                 BOOL collapsed = g_tree && g_tree[index].collapsed;
-                if (draw->iSubItem == 2) {
+                if (draw->iSubItem == 0) {
+                    bg = ProcChangeTint(&g_view[index], bg);
+                } else if (draw->iSubItem == 2) {
                     float cpu = collapsed ? g_tree[index].cpuRollup : g_view[index].cpuPct;
                     bg = cpu >= 15 ? RGB(255, 218, 178) : cpu >= 1 ? RGB(255, 241, 217) : RGB(249, 246, 238);
                 } else if (draw->iSubItem == PROC_COL_GPU) {
@@ -1413,6 +1663,8 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
             g_sortDir = (g_sortCol == 2 || g_sortCol == 3) ? -1 : 1;
         }
         UI_SetHeaderSortArrow(s_list, g_sortCol, g_sortDir);
+        /* An explicit sort always applies, even with the pointer nearby. */
+        s_holdOrder = FALSE;
         ProcSnapshot(p);
         return TRUE;
     }
@@ -1625,6 +1877,14 @@ static void ProcCopyDetails(HWND owner)
     StringCchPrintfW(text, ARRAYSIZE(text),
         L"Process: %s\r\nPID: %lu\r\nDescription: %s\r\nAccount: %s\r\nCPU: %.1f%%\r\nPrivate memory: %s\r\nParent PID: %lu\r\n",
         row->imageName, (unsigned long)row->pid, row->description, row->userName, row->cpuPct, memory, (unsigned long)row->parentPid);
+    {
+        WCHAR delta[160];
+        ProcMarkDelta(row, delta, ARRAYSIZE(delta));
+        if (delta[0]) {
+            size_t len = wcslen(text);
+            StringCchPrintfW(text + len, ARRAYSIZE(text) - len, L"Since mark: %s\r\n", delta);
+        }
+    }
     bytes = (wcslen(text) + 1) * sizeof(WCHAR);
     data = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (!data) { App_ReportError(owner, L"Copy details", ERROR_NOT_ENOUGH_MEMORY); return; }
@@ -1667,6 +1927,7 @@ static void ProcCommand(TabPage *p, int id, int code, HWND ctl)
         s_filterMode = 0; SendMessageW(s_filter, CB_SETCURSEL, 0, 0);
         s_query[0] = 0; SetWindowTextW(s_search, L"");
         ProcSnapshot(p); SetFocus(s_search); break;
+    case IDC_PROC_MARK: ProcToggleMark(p); break;
     case IDC_PROC_EXPORT: ProcExport(p->hwnd); break;
     case IDC_PROC_OPENLOCATION: ProcOpenLocation(p->hwnd); break;
     case IDC_PROC_COPY: ProcCopyDetails(p->hwnd); break;
@@ -1769,6 +2030,9 @@ static void ProcDestroy(TabPage *p)
     s_endProcess = NULL;
     s_search = s_filter = s_details = s_summary = NULL;
     s_query[0] = 0; s_filterMode = 0;
+    ProcDiff_Free(&s_mark);
+    ProcOrder_Free(&s_heldOrder);
+    s_holdOrder = FALSE;
 }
 
 static TabPage s_page = {

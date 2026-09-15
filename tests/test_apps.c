@@ -29,11 +29,19 @@ static int WINAPI captureConfirm(HWND h,LPCWSTR text,LPCWSTR caption,UINT flags)
 { (void)h;(void)text;(void)caption;(void)flags;return confirmAnswer; }
 static BOOL WINAPI capturePost(HWND h,UINT m,WPARAM w,LPARAM l)
 { (void)m;(void)w;(void)l;actionTarget=h;++actionCount;return TRUE; }
+static int probeCount;
 static LRESULT WINAPI probe(HWND h,UINT m,WPARAM w,LPARAM l,UINT flags,UINT timeout,PDWORD_PTR result)
 {
+    if (m == WM_NULL) ++probeCount;
     if (simulateTimeout && m == WM_NULL) { SetLastError(ERROR_TIMEOUT); return 0; }
     return SendMessageTimeoutW(h,m,w,l,flags,timeout,result);
 }
+static int terminateCount;
+static DWORD shownPid;
+static BOOL WINAPI captureTerminate(HANDLE h, UINT code)
+{ (void)h; (void)code; ++terminateCount; return TRUE; }
+void App_ShowProcess(DWORD pid) { shownPid = pid; }
+#define TerminateProcess captureTerminate
 #define ShowWindowAsync captureShow
 #define SetWindowPos capturePosition
 #define MessageBoxW captureConfirm
@@ -93,7 +101,36 @@ int main(void)
         start = GetTickCount64();
         EnumTopLevel(hung.hwnd,(LPARAM)&hungCtx);
         CHECK(GetTickCount64() - start < 1000);
-        CHECK(hungCtx.cnt == 1 && hungCtx.buf[0].hung);
+        /* Not pumping for milliseconds is below IsHungAppWindow's five
+           seconds, so only the probe notices: a single slow answer. */
+        CHECK(hungCtx.cnt == 1 && (hungCtx.buf[0].hung || hungCtx.buf[0].slow));
+        {
+            /* End to end through Apps_Collect: the first collection sees a
+               single slow answer, the next one in a row reports the hang. */
+            int i, row = -1;
+            Apps_Reset();
+            Apps_Collect();
+            for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hwnd == hung.hwnd) row = i;
+            CHECK(row >= 0);
+            if (row >= 0) CHECK(g_shared[row].slow && !g_shared[row].hung);
+            Apps_Collect();
+            row = -1;
+            for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hwnd == hung.hwnd) row = i;
+            CHECK(row >= 0);
+            if (row >= 0) CHECK(g_shared[row].hung && g_shared[row].hungSince != 0);
+            CHECK(Apps_HungCount() >= 1);
+            {
+                /* Off the Applications tab the watch keeps the hang's start
+                   without messaging any window: a probe could stall on a
+                   hung one, and nobody is looking at the rows. */
+                g_shared[row >= 0 ? row : 0].hung = TRUE;   /* as if IsHungAppWindow agreed */
+                probeCount = 0;
+                Apps_Watch();
+                CHECK(probeCount == 0);
+            }
+            Apps_Reset();
+            CHECK(Apps_HungCount() == 0);
+        }
         SetEvent(hung.stop);
         CHECK(WaitForSingleObject(thread,2000) == WAIT_OBJECT_0);
         CloseHandle(thread); CloseHandle(hung.ready); CloseHandle(hung.stop);
@@ -103,7 +140,8 @@ int main(void)
         EnumCtx timeoutCtx = {0};
         simulateTimeout = TRUE;
         EnumTopLevel(top,(LPARAM)&timeoutCtx);
-        CHECK(timeoutCtx.cnt == 1 && timeoutCtx.buf[0].hung);
+        CHECK(timeoutCtx.cnt == 1 && timeoutCtx.buf[0].slow);
+        CHECK(!timeoutCtx.buf[0].hung);        /* one timeout is not a hang */
         simulateTimeout = FALSE;
         free(timeoutCtx.buf);
     }
@@ -180,6 +218,160 @@ int main(void)
         AppsSnapshot(NULL);
         CHECK(ListView_GetSelectedCount(s_list) == 0);
         DestroyWindow(s_list); s_list = NULL;
+    }
+    {
+        /* Hang tracking carries the start time across samples for the same
+           window identity, restarts it for a new identity, and clears it
+           once the window answers again. */
+        AppRow prev[2] = {0}, cur[4] = {0};
+        prev[0].hwnd = (HWND)1; prev[0].pid = 10; prev[0].tid = 20;
+        prev[0].hung = TRUE; prev[0].hungSince = 1000;
+        prev[1].hwnd = (HWND)2; prev[1].pid = 11; prev[1].tid = 21;
+        cur[0] = prev[0]; cur[0].hungSince = 0;              /* still hung        */
+        cur[1] = prev[0]; cur[1].hung = FALSE;                /* recovered         */
+        cur[2] = prev[1]; cur[2].hung = TRUE;                 /* newly hung        */
+        cur[3] = prev[0]; cur[3].pid = 99; cur[3].hungSince = 0; /* reused handle */
+        app_trackHangs(cur, 4, prev, 2, 8000, 9000);
+        CHECK(cur[0].hungSince == 1000);
+        CHECK(cur[1].hungSince == 0);
+        CHECK(cur[2].hungSince == 9000);
+        CHECK(cur[3].hungSince == 9000);
+        app_trackHangs(cur, 1, NULL, 0, 0, 5000);
+        CHECK(cur[0].hungSince == 5000);
+    }
+    {
+        /* A 10 ms probe timeout alone is noise under load. It becomes a
+           hang only when the same window also failed the sample before,
+           and only if that sample is recent. */
+        AppRow prev[1] = {0}, cur[1] = {0};
+        prev[0].hwnd = (HWND)7; prev[0].pid = 70; prev[0].tid = 71;
+        cur[0] = prev[0]; cur[0].slow = TRUE;
+        app_trackHangs(cur, 1, NULL, 0, 0, 10000);
+        CHECK(!cur[0].hung && cur[0].hungSince == 0);          /* first timeout */
+        prev[0].slow = TRUE;
+        cur[0].hung = FALSE;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(cur[0].hung && cur[0].hungSince == 10000);       /* second in a row */
+        cur[0].hung = FALSE;
+        app_trackHangs(cur, 1, prev, 1, 1000, 10000);
+        CHECK(!cur[0].hung);                                   /* stale previous */
+        cur[0].hung = FALSE; cur[0].pid = 99;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(!cur[0].hung);                                   /* other identity */
+        prev[0].slow = FALSE; prev[0].hung = TRUE; prev[0].hungSince = 4000;
+        cur[0] = prev[0]; cur[0].hung = FALSE; cur[0].hungSince = 0; cur[0].slow = TRUE;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(cur[0].hung && cur[0].hungSince == 4000);        /* hang continues */
+        cur[0].hung = FALSE; cur[0].slow = FALSE;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(!cur[0].hung && cur[0].hungSince == 0);          /* answered again */
+    }
+    {
+        AppRow row = {0};
+        WCHAR text[64];
+        app_formatStatus(&row, 50000, text, ARRAYSIZE(text));
+        CHECK(!lstrcmpW(text, L"Running"));
+        row.hung = TRUE;
+        row.hungSince = 49500;
+        app_formatStatus(&row, 50000, text, ARRAYSIZE(text));
+        CHECK(!lstrcmpW(text, L"Not Responding"));
+        row.hungSince = 50000 - 12000;
+        app_formatStatus(&row, 50000, text, ARRAYSIZE(text));
+        CHECK(!lstrcmpW(text, L"Not Responding (12s)"));
+        row.hungSince = 200000 - 125000;
+        app_formatStatus(&row, 200000, text, ARRAYSIZE(text));
+        CHECK(!lstrcmpW(text, L"Not Responding (2m 05s)"));
+        row.hungSince = 4000000 - 3720000;
+        app_formatStatus(&row, 4000000, text, ARRAYSIZE(text));
+        CHECK(!lstrcmpW(text, L"Not Responding (1h 02m)"));
+        row.hungSince = 0;                      /* unknown start: no duration */
+        app_formatStatus(&row, 4000000, text, ARRAYSIZE(text));
+        CHECK(!lstrcmpW(text, L"Not Responding"));
+    }
+    {
+        /* The watch path keeps a hang continuous when IsHungAppWindow says
+           so, and never promotes a merely slow row (it does not probe). */
+        AppRow prev[1] = {0}, cur[1] = {0};
+        prev[0].hwnd = (HWND)8; prev[0].pid = 80; prev[0].tid = 81;
+        prev[0].hung = TRUE; prev[0].hungSince = 2000;
+        cur[0] = prev[0]; cur[0].hungSince = 0;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(cur[0].hungSince == 2000);
+    }
+    {
+        /* Longest hang sorts first when the Status column is descending. */
+        AppRow sortRows[3] = {0};
+        lstrcpyW(sortRows[0].title, L"A");
+        lstrcpyW(sortRows[1].title, L"B"); sortRows[1].hung = TRUE; sortRows[1].hungSince = 9000;
+        lstrcpyW(sortRows[2].title, L"C"); sortRows[2].hung = TRUE; sortRows[2].hungSince = 1000;
+        app_sortColumn = 1; app_sortDescending = TRUE;
+        qsort(sortRows, 3, sizeof(*sortRows), app_compare);
+        CHECK(!lstrcmpW(sortRows[0].title, L"C"));
+        CHECK(!lstrcmpW(sortRows[1].title, L"B"));
+        app_sortColumn = 0; app_sortDescending = FALSE;
+    }
+    {
+        /* A hung window cannot process WM_CLOSE, so End Task ends its
+           process instead; Go to Process opens the owning process. */
+        INITCOMMONCONTROLSEX controls = {sizeof(controls), ICC_LISTVIEW_CLASSES};
+        TabPage page = {0};
+        LVITEMW item = {0};
+        InitCommonControlsEx(&controls);
+        page.hwnd = top;
+        s_list = CreateWindowExW(0,WC_LISTVIEWW,L"",WS_CHILD | LVS_REPORT,
+            0,0,100,100,top,NULL,GetModuleHandleW(NULL),NULL);
+        CHECK(s_list != NULL);
+        free(g_view);
+        g_view = malloc(sizeof(*g_view));
+        ZeroMemory(g_view, sizeof(*g_view));
+        g_view[0].hwnd = top;
+        g_view[0].tid = GetWindowThreadProcessId(top, &g_view[0].pid);
+        lstrcpyW(g_view[0].title, L"Frozen");
+        g_view[0].hung = TRUE;
+        g_view[0].hungSince = GetTickCount64() - 30000;
+        g_viewCnt = 1;
+        item.mask = LVIF_TEXT; item.pszText = g_view[0].title;
+        CHECK(ListView_InsertItem(s_list,&item) == 0);
+        ListView_SetItemState(s_list,0,LVIS_SELECTED,LVIS_SELECTED);
+
+        confirmAnswer = IDNO; actionCount = 0; terminateCount = 0;
+        AppsCommand(&page,IDC_APPS_ENDTASK,0,NULL);
+        CHECK(terminateCount == 0 && actionCount == 0);
+        confirmAnswer = IDYES;
+        AppsCommand(&page,IDC_APPS_ENDTASK,0,NULL);
+        CHECK(terminateCount == 1);
+        CHECK(actionCount == 0);                 /* no WM_CLOSE posted */
+
+        g_view[0].hung = FALSE; terminateCount = 0;
+        AppsCommand(&page,IDC_APPS_ENDTASK,0,NULL);
+        CHECK(terminateCount == 0 && actionCount == 1);
+
+        shownPid = 0;
+        AppsCommand(&page,IDC_APPS_GOTOPROCESS,0,NULL);
+        CHECK(shownPid == GetCurrentProcessId());
+        g_view[0].pid++; shownPid = 0;           /* stale identity: refused */
+        AppsCommand(&page,IDC_APPS_GOTOPROCESS,0,NULL);
+        CHECK(shownPid == 0);
+        DestroyWindow(s_list); s_list = NULL;
+    }
+    {
+        /* When a window hangs, DWM covers it with a "Ghost" window carrying
+           the same caption but owned by dwm.exe. Listing it would put DWM's
+           pid behind End Task. The real hung window is listed regardless. */
+        WNDCLASSW ghostClass = {0};
+        EnumCtx ghostCtx = {0};
+        HWND ghost;
+        ghostClass.lpfnWndProc = DefWindowProcW;
+        ghostClass.hInstance = GetModuleHandleW(NULL);
+        ghostClass.lpszClassName = L"Ghost";
+        CHECK(RegisterClassW(&ghostClass) != 0);
+        ghost = CreateWindowExW(0, L"Ghost", L"Frozen", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            -30000,-30000,100,100,NULL,NULL,GetModuleHandleW(NULL),NULL);
+        CHECK(ghost != NULL);
+        EnumTopLevel(ghost,(LPARAM)&ghostCtx);
+        CHECK(ghostCtx.cnt == 0);
+        DestroyWindow(ghost);
+        free(ghostCtx.buf);
     }
     EnumTopLevel(tool,(LPARAM)&ctx);
     EnumTopLevel(hidden,(LPARAM)&ctx);

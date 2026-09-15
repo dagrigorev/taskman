@@ -360,3 +360,55 @@ void ProcCollapse_Prune(ProcCollapseSet *set, const ProcRow *rows, int count)
     }
     set->count = kept;
 }
+
+/* ------------------------------------------------------------ held order */
+
+static int ProcRankCompare(const void *va, const void *vb)
+{
+    const ProcRank *a = (const ProcRank *)va, *b = (const ProcRank *)vb;
+    if (a->pid != b->pid) return a->pid < b->pid ? -1 : 1;
+    if (a->createTime != b->createTime) return a->createTime < b->createTime ? -1 : 1;
+    return 0;
+}
+
+BOOL ProcOrder_Capture(ProcHeldOrder *held, const ProcRow *rows, const int *order, int count)
+{
+    ProcRank *ranks;
+    int i;
+    if (!held) return FALSE;
+    ProcOrder_Free(held);
+    if (!rows || count <= 0) return FALSE;
+    ranks = (ProcRank *)malloc((size_t)count * sizeof(*ranks));
+    if (!ranks) return FALSE;
+    for (i = 0; i < count; ++i) {
+        const ProcRow *row = &rows[order ? order[i] : i];
+        ranks[i].pid = row->pid;
+        ranks[i].createTime = row->createTime;
+        ranks[i].rank = i;
+    }
+    qsort(ranks, (size_t)count, sizeof(*ranks), ProcRankCompare);
+    held->ranks = ranks;
+    held->count = count;
+    return TRUE;
+}
+
+int ProcOrder_Rank(const ProcHeldOrder *held, DWORD pid, ULONGLONG createTime)
+{
+    ProcRank key;
+    const ProcRank *hit;
+    if (!held || !held->ranks) return PROC_RANK_UNKNOWN;
+    key.pid = pid;
+    key.createTime = createTime;
+    key.rank = 0;
+    hit = (const ProcRank *)bsearch(&key, held->ranks, (size_t)held->count,
+                                    sizeof(*held->ranks), ProcRankCompare);
+    return hit ? hit->rank : PROC_RANK_UNKNOWN;
+}
+
+void ProcOrder_Free(ProcHeldOrder *held)
+{
+    if (!held) return;
+    free(held->ranks);
+    held->ranks = NULL;
+    held->count = 0;
+}
