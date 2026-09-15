@@ -560,11 +560,28 @@ void Proc_Reset(void)
 static int PROC_CMP_COL;
 static int PROC_CMP_DIR;
 
+/* While the pointer is over the list, rows keep the order they were last
+   shown in, so a row cannot move away between aiming and clicking. Values
+   still refresh; processes not shown before fall in behind, sorted. */
+static BOOL          s_holdOrder;
+static ProcHeldOrder s_heldOrder;
+
+/* Rank comparison for a held order, 0 when not holding or both unseen. */
+static int ProcHeldCompare(const ProcRow *ra, const ProcRow *rb)
+{
+    int a, b;
+    if (!s_holdOrder) return 0;
+    a = ProcOrder_Rank(&s_heldOrder, ra->pid, ra->createTime);
+    b = ProcOrder_Rank(&s_heldOrder, rb->pid, rb->createTime);
+    return (a > b) - (a < b);
+}
+
 static int ProcCompare(const void *a, const void *b)
 {
     const ProcRow *ra = (const ProcRow *)a;
     const ProcRow *rb = (const ProcRow *)b;
-    int cmp = 0;
+    int cmp = ProcHeldCompare(ra, rb);
+    if (cmp) return cmp;
     switch (PROC_CMP_COL) {
     case 0: cmp = lstrcmpiW(ra->imageName, rb->imageName); break;
     case 1: cmp = lstrcmpiW(ra->userName,  rb->userName);  break;
@@ -591,7 +608,8 @@ static int ProcTreeCompare(const ProcRow *ra, const ProcTreeInfo *ta,
     float gb = tb->collapsed ? tb->gpuRollup : rb->gpuPct;
     ULONGLONG ma = ta->collapsed ? ta->memRollup : ra->privateBytes;
     ULONGLONG mb = tb->collapsed ? tb->memRollup : rb->privateBytes;
-    int cmp = 0;
+    int cmp = ProcHeldCompare(ra, rb);
+    if (cmp) return cmp;
 
     switch (g_sortCol) {
     case 0: cmp = lstrcmpiW(ra->imageName, rb->imageName); break;
@@ -815,6 +833,37 @@ static void ProcMarkDelta(const ProcRow *row, WCHAR *buf, size_t cch)
     }
 }
 
+static LRESULT CALLBACK ProcListHoverProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR id, DWORD_PTR ref)
+{
+    switch (msg) {
+    case WM_MOUSEMOVE:
+        if (!s_holdOrder) {
+            TRACKMOUSEEVENT tme;
+            tme.cbSize = sizeof(tme);
+            tme.dwFlags = TME_LEAVE;
+            tme.hwndTrack = hwnd;
+            tme.dwHoverTime = 0;
+            if (TrackMouseEvent(&tme)) s_holdOrder = TRUE;
+        }
+        break;
+    case WM_MOUSELEAVE:
+        if (s_holdOrder) {
+            s_holdOrder = FALSE;
+            /* Catch up on the order at once rather than on the next tick. */
+            ProcSnapshot((TabPage *)ref);
+        }
+        break;
+    case WM_NCDESTROY:
+        s_holdOrder = FALSE;
+        RemoveWindowSubclass(hwnd, ProcListHoverProc, id);
+        break;
+    default:
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 static void ProcDrawDetails(HWND hwnd, HDC dc)
 {
     RECT rc, r;
@@ -914,6 +963,7 @@ static LRESULT CALLBACK ProcDetailsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 static void ProcCreate(TabPage *p)
 {
     s_list = UI_CreateListView(p->hwnd, IDC_PROC_LIST, LVS_OWNERDATA);
+    if (s_list) SetWindowSubclass(s_list, ProcListHoverProc, 82, (DWORD_PTR)p);
     if (s_list) {
         UI_AddColumn(s_list, 0, L"Process name",                   105, LVCFMT_LEFT);
         UI_AddColumn(s_list, 1, L"User Name",                      60, LVCFMT_LEFT);
@@ -1211,6 +1261,11 @@ static void ProcSnapshot(TabPage *p)
             kept == 0 ? L"  |  No matches - try clearing your filters" : L"  |  Click a column to sort");
         if (s_summary) SetWindowTextW(s_summary, summary);
     }
+
+    /* Remember what is about to be shown, so a hold that starts before the
+       next snapshot freezes exactly this order. */
+    if (g_tree) ProcOrder_Capture(&s_heldOrder, g_view, g_ordered, g_orderedCnt);
+    else        ProcOrder_Capture(&s_heldOrder, g_view, NULL, g_viewCnt);
 
     if (s_list) {
         s_refreshing = TRUE;
@@ -1570,6 +1625,8 @@ static BOOL ProcNotify(TabPage *p, NMHDR *nm, LRESULT *result)
             g_sortDir = (g_sortCol == 2 || g_sortCol == 3) ? -1 : 1;
         }
         UI_SetHeaderSortArrow(s_list, g_sortCol, g_sortDir);
+        /* An explicit sort always applies, even with the pointer nearby. */
+        s_holdOrder = FALSE;
         ProcSnapshot(p);
         return TRUE;
     }
@@ -1936,6 +1993,8 @@ static void ProcDestroy(TabPage *p)
     s_search = s_filter = s_details = s_summary = NULL;
     s_query[0] = 0; s_filterMode = 0;
     ProcDiff_Free(&s_mark);
+    ProcOrder_Free(&s_heldOrder);
+    s_holdOrder = FALSE;
 }
 
 static TabPage s_page = {

@@ -17,7 +17,10 @@ dependencies beyond what ships with Windows.
 - Processes: search across image name, description, account and PID. Space-separated
   terms must all match; `pid:1234` matches a PID exactly. Resource filters show
   processes using at least 1% CPU or 100 MB of private memory. Search and sorting
-  still work while sampling is paused.
+  still work while sampling is paused. While the pointer is over the process list,
+  rows keep their order so they cannot move away before a click; values still
+  refresh, new processes join at the bottom, and the list re-sorts as soon as the
+  pointer leaves or a column header is clicked.
 - Mark takes a snapshot of every process; later, the summary reads
   `Since 12:03:44: 4 started, 1 exited (backgroundTaskHost.exe), 1 grew`. New
   processes are tinted green and grown ones amber (16 MB more private memory or

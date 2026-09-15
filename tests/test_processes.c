@@ -328,6 +328,33 @@ int main(void)
             ProcMarkDelta(&grown, text, ARRAYSIZE(text));
             CHECK(!lstrcmpW(text, L"Started after the mark"));
         }
+        {
+            /* While held, rows keep their last displayed order whatever
+               their values do; unseen rows fall behind, in sort order. */
+            ProcRow a = marked[0], b = marked[0], c = marked[0];
+            ProcTreeInfo ta = {0}, tb = {0};
+            a.pid = 1; a.createTime = 1; a.cpuPct = 1.0f;
+            b.pid = 2; b.createTime = 2; b.cpuPct = 50.0f;
+            c.pid = 3; c.createTime = 3; c.cpuPct = 90.0f;
+            g_sortCol = 2; g_sortDir = -1;
+            PROC_CMP_COL = 2; PROC_CMP_DIR = -1;
+            CHECK(ProcCompare(&b, &a) < 0);              /* busier first, unheld */
+            {
+                ProcRow shown[2];
+                shown[0] = a; shown[1] = b;              /* a was displayed above b */
+                CHECK(ProcOrder_Capture(&s_heldOrder, shown, NULL, 2));
+            }
+            s_holdOrder = TRUE;
+            CHECK(ProcCompare(&a, &b) < 0);
+            CHECK(ProcTreeCompare(&a, &ta, &b, &tb) < 0);
+            CHECK(ProcCompare(&b, &c) < 0);              /* known before unseen */
+            CHECK(ProcCompare(&c, &a) > 0);
+            s_holdOrder = FALSE;
+            CHECK(ProcCompare(&b, &a) < 0);
+            CHECK(ProcTreeCompare(&b, &tb, &a, &ta) < 0);
+            ProcOrder_Free(&s_heldOrder);
+            g_sortCol = 2; g_sortDir = -1;
+        }
         ProcDiff_Free(&s_mark);
         ProcMarkDelta(&now, text, ARRAYSIZE(text));
         CHECK(text[0] == 0);
