@@ -89,9 +89,17 @@
 #define IDC_SENS_LIST                   2601
 #define IDC_SENS_TEMPLIST               2602
 
+/* Startup Impact window (File menu) */
+#define IDC_STARTUP_LIST                2700
+#define IDC_STARTUP_SUMMARY             2701
+#define IDC_STARTUP_REFRESH             2702
+#define IDC_STARTUP_GOTO                2703
+#define IDC_STARTUP_LOCATION            2704
+
 /* ------------------------------------------------------ menu commands --- */
 #define IDM_FILE_NEWTASK                40001
 #define IDM_FILE_EXIT                   40002
+#define IDM_FILE_STARTUP                40003
 
 #define IDM_OPTIONS_ALWAYSONTOP         40010
 #define IDM_OPTIONS_MINIMIZEONUSE       40011

@@ -38,6 +38,9 @@ target_link_libraries(taskman_platform INTERFACE
     dxguid
     # wbemuuid supplies CLSID_WbemLocator and IID_IWbemLocator for the ACPI
     # thermal zone query, the same way dxguid supplies the DXGI GUIDs.
+    # uuid supplies CLSID_ShellLink and IID_IShellLinkW for resolving Startup
+    # folder shortcuts.
+    uuid
     wbemuuid)
 if(MSVC)
     target_include_directories(taskman_platform INTERFACE
@@ -62,7 +65,7 @@ set(TASKMAN_PAGE_SOURCES
     src/tabs/proc_tree.c
     src/tabs/proc_diff.c)
 set(TASKMAN_SUPPORT_SOURCES src/ui.c src/settings.c src/sysinfo.c src/gpu.c src/blame.c
-    src/sensors.c)
+    src/startup.c src/startup_ui.c src/sensors.c)
 set(TASKMAN_RESOURCE "${PROJECT_SOURCE_DIR}/res/resource.rc")
 # RC compilers do not consistently emit dependency files for embedded assets.
 set(TASKMAN_RESOURCE_DEPENDENCIES
@@ -76,7 +79,7 @@ add_executable(taskman WIN32
     src/main.c ${TASKMAN_SUPPORT_SOURCES} ${TASKMAN_PAGE_SOURCES}
     "${TASKMAN_RESOURCE}"
     include/app.h include/ui.h include/ntapi.h include/gdiplusapi.h
-    include/proc_tree.h include/proc_diff.h include/gpu.h include/sensors.h include/blame.h
+    include/proc_tree.h include/proc_diff.h include/gpu.h include/sensors.h include/blame.h include/startup.h
     include/resource.h)
 target_link_libraries(taskman PRIVATE taskman_platform)
 if(MSVC)

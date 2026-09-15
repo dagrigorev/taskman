@@ -245,5 +245,9 @@ BOOL  App_IsElevated(void);
 HWND  App_TabControl(void);
 void  App_ShowProcess(DWORD pid);
 void  App_ReportError(HWND owner, const WCHAR *operation, DWORD error);
+/* Opens, or brings forward, the modeless Startup Impact window. */
+HWND  App_ShowStartupImpact(HWND owner);
+/* Test-only: rows in the Startup Impact list, or -1 when it is closed. */
+int   StartupTest_RowCount(void);
 
 #endif /* CTM_APP_H */

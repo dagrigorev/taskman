@@ -730,6 +730,7 @@ static void BuildMenuBar(void)
 
     file = CreatePopupMenu();
     AppendMenuW(file, MF_STRING, IDM_FILE_NEWTASK, L"&New Task (Run...)");
+    AppendMenuW(file, MF_STRING, IDM_FILE_STARTUP, L"&Startup Impact...");
     AppendMenuW(file, MF_SEPARATOR, 0, NULL);
     AppendMenuW(file, MF_STRING, IDM_FILE_EXIT, L"E&xit Task Manager");
     AppendMenuW(bar, MF_POPUP, (UINT_PTR)file, L"&File");
@@ -1276,6 +1277,9 @@ static void OnCommand(HWND hwnd, int id, int code, HWND ctl)
     switch (id) {
     case IDM_FILE_NEWTASK:
         App_RunTaskDialog(hwnd);
+        return;
+    case IDM_FILE_STARTUP:
+        App_ShowStartupImpact(hwnd);
         return;
     case IDM_FILE_EXIT:
     case IDM_TRAY_EXIT:
