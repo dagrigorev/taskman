@@ -26,6 +26,7 @@
 #define IDC_APPS_ENDTASK                2001
 #define IDC_APPS_SWITCHTO               2002
 #define IDC_APPS_NEWTASK                2003
+#define IDC_APPS_GOTOPROCESS            2004
 
 /* Processes tab (2100-2199) */
 #define IDC_PROC_LIST                   2100

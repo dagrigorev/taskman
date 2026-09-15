@@ -40,6 +40,11 @@ dependencies beyond what ships with Windows.
   with the graphs. In the per-CPU grid the cursor runs through every core and
   the header adds the hovered core's load; culprits stay system wide, since
   Windows does not measure processes per core. Tiny footprint mode does not blame.
+- Applications shows how long a window has been hung, for example
+  `Not Responding (2m 05s)`, and sorts the longest hang first on the Status column.
+  End Task on a hung window offers to end its process, since a hung window cannot
+  process a close request. Go to Process opens the owning process. DWM's ghost
+  copies of hung windows are not listed.
 - Alternating table rows, CPU/memory cell shading, styled navigation, and
   scalable fonts and columns make large snapshots easier to scan. PID 0 (idle
   capacity) is excluded from the process table and its resource totals.
