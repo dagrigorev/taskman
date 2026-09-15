@@ -13,13 +13,15 @@ typedef struct {
     HWND  hwnd;
     DWORD pid, tid;
     WCHAR title[APP_TITLE_MAX];
-    BOOL  hung;
+    BOOL  hung;             /* IsHungAppWindow, or slow twice in a row       */
+    BOOL  slow;             /* the WM_NULL probe timed out this sample       */
     ULONGLONG hungSince;    /* tick the hang was first seen, 0 if responding */
     BOOL  selected;
 } AppRow;
 
 static AppRow  *g_shared;
 static int      g_sharedCnt;
+static ULONGLONG g_sharedTick;  /* collector thread only: when g_shared was taken */
 static SRWLOCK  g_appsLock = SRWLOCK_INIT;
 
 static AppRow  *g_view;
@@ -57,22 +59,29 @@ static int app_compare(const void *va, const void *vb)
 
 /* ------------------------------------------------------ hang tracking --- */
 
-/* Stamps each hung row with the tick its hang began: carried over from the
-   previous sample when the same window identity was already hung, else
-   'now'. A window reusing a handle under another pid or thread starts over. */
-static void app_trackHangs(AppRow *rows, int count, const AppRow *prev, int prevCount, ULONGLONG now)
+/* Previous samples older than this are not "the sample before": the
+   Applications tab only collects while it is open. */
+#define APP_CONSECUTIVE_MS 5000
+
+/* Decides which rows are hung and stamps when each hang began.
+   IsHungAppWindow already waits five seconds, so it counts at once. A
+   timed-out 10 ms probe is noise under load until the same window, same
+   pid and thread, failed the previous recent sample too. A hang's start
+   carries over from the previous sample; a reused handle starts over. */
+static void app_trackHangs(AppRow *rows, int count, const AppRow *prev, int prevCount,
+                           ULONGLONG prevTick, ULONGLONG now)
 {
     int i, j;
+    BOOL recent = prev && prevTick && now >= prevTick && now - prevTick <= APP_CONSECUTIVE_MS;
     for (i = 0; i < count; ++i) {
+        const AppRow *before = NULL;
         rows[i].hungSince = 0;
+        for (j = 0; recent && j < prevCount; ++j)
+            if (app_same(&rows[i], &prev[j])) { before = &prev[j]; break; }
+        if (!rows[i].hung && rows[i].slow && before && (before->slow || before->hung))
+            rows[i].hung = TRUE;
         if (!rows[i].hung) continue;
-        rows[i].hungSince = now;
-        for (j = 0; j < prevCount; ++j) {
-            if (app_same(&rows[i], &prev[j])) {
-                if (prev[j].hung && prev[j].hungSince) rows[i].hungSince = prev[j].hungSince;
-                break;
-            }
-        }
+        rows[i].hungSince = before && before->hung && before->hungSince ? before->hungSince : now;
     }
 }
 
@@ -166,7 +175,7 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
         SetLastError(ERROR_SUCCESS);
         if (!SendMessageTimeoutW(hwnd, WM_NULL, 0, 0,
                 SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, 10, &response))
-            row->hung = GetLastError() == ERROR_TIMEOUT;
+            row->slow = GetLastError() == ERROR_TIMEOUT;
     }
     return TRUE;
 }
@@ -182,7 +191,11 @@ void Apps_Collect(void)
     if (ctx.failed) { free(ctx.buf); return; }
     /* g_shared is only ever replaced on this thread, so reading it here
        without the lock is safe. */
-    app_trackHangs(ctx.buf, ctx.cnt, g_shared, g_sharedCnt, GetTickCount64());
+    {
+        ULONGLONG now = GetTickCount64();
+        app_trackHangs(ctx.buf, ctx.cnt, g_shared, g_sharedCnt, g_sharedTick, now);
+        g_sharedTick = now;
+    }
 
     AcquireSRWLockExclusive(&g_appsLock);
     old        = g_shared;
@@ -196,7 +209,7 @@ void Apps_Collect(void)
 void Apps_Reset(void)
 {
     AcquireSRWLockExclusive(&g_appsLock);
-    free(g_shared); g_shared = NULL; g_sharedCnt = 0;
+    free(g_shared); g_shared = NULL; g_sharedCnt = 0; g_sharedTick = 0;
     ReleaseSRWLockExclusive(&g_appsLock);
 
     free(g_view); g_view = NULL; g_viewCnt = 0;

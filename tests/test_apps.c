@@ -99,7 +99,25 @@ int main(void)
         start = GetTickCount64();
         EnumTopLevel(hung.hwnd,(LPARAM)&hungCtx);
         CHECK(GetTickCount64() - start < 1000);
-        CHECK(hungCtx.cnt == 1 && hungCtx.buf[0].hung);
+        /* Not pumping for milliseconds is below IsHungAppWindow's five
+           seconds, so only the probe notices: a single slow answer. */
+        CHECK(hungCtx.cnt == 1 && (hungCtx.buf[0].hung || hungCtx.buf[0].slow));
+        {
+            /* End to end through Apps_Collect: the first collection sees a
+               single slow answer, the next one in a row reports the hang. */
+            int i, row = -1;
+            Apps_Reset();
+            Apps_Collect();
+            for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hwnd == hung.hwnd) row = i;
+            CHECK(row >= 0);
+            if (row >= 0) CHECK(g_shared[row].slow && !g_shared[row].hung);
+            Apps_Collect();
+            row = -1;
+            for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hwnd == hung.hwnd) row = i;
+            CHECK(row >= 0);
+            if (row >= 0) CHECK(g_shared[row].hung && g_shared[row].hungSince != 0);
+            Apps_Reset();
+        }
         SetEvent(hung.stop);
         CHECK(WaitForSingleObject(thread,2000) == WAIT_OBJECT_0);
         CloseHandle(thread); CloseHandle(hung.ready); CloseHandle(hung.stop);
@@ -109,7 +127,8 @@ int main(void)
         EnumCtx timeoutCtx = {0};
         simulateTimeout = TRUE;
         EnumTopLevel(top,(LPARAM)&timeoutCtx);
-        CHECK(timeoutCtx.cnt == 1 && timeoutCtx.buf[0].hung);
+        CHECK(timeoutCtx.cnt == 1 && timeoutCtx.buf[0].slow);
+        CHECK(!timeoutCtx.buf[0].hung);        /* one timeout is not a hang */
         simulateTimeout = FALSE;
         free(timeoutCtx.buf);
     }
@@ -199,13 +218,40 @@ int main(void)
         cur[1] = prev[0]; cur[1].hung = FALSE;                /* recovered         */
         cur[2] = prev[1]; cur[2].hung = TRUE;                 /* newly hung        */
         cur[3] = prev[0]; cur[3].pid = 99; cur[3].hungSince = 0; /* reused handle */
-        app_trackHangs(cur, 4, prev, 2, 9000);
+        app_trackHangs(cur, 4, prev, 2, 8000, 9000);
         CHECK(cur[0].hungSince == 1000);
         CHECK(cur[1].hungSince == 0);
         CHECK(cur[2].hungSince == 9000);
         CHECK(cur[3].hungSince == 9000);
-        app_trackHangs(cur, 1, NULL, 0, 5000);
+        app_trackHangs(cur, 1, NULL, 0, 0, 5000);
         CHECK(cur[0].hungSince == 5000);
+    }
+    {
+        /* A 10 ms probe timeout alone is noise under load. It becomes a
+           hang only when the same window also failed the sample before,
+           and only if that sample is recent. */
+        AppRow prev[1] = {0}, cur[1] = {0};
+        prev[0].hwnd = (HWND)7; prev[0].pid = 70; prev[0].tid = 71;
+        cur[0] = prev[0]; cur[0].slow = TRUE;
+        app_trackHangs(cur, 1, NULL, 0, 0, 10000);
+        CHECK(!cur[0].hung && cur[0].hungSince == 0);          /* first timeout */
+        prev[0].slow = TRUE;
+        cur[0].hung = FALSE;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(cur[0].hung && cur[0].hungSince == 10000);       /* second in a row */
+        cur[0].hung = FALSE;
+        app_trackHangs(cur, 1, prev, 1, 1000, 10000);
+        CHECK(!cur[0].hung);                                   /* stale previous */
+        cur[0].hung = FALSE; cur[0].pid = 99;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(!cur[0].hung);                                   /* other identity */
+        prev[0].slow = FALSE; prev[0].hung = TRUE; prev[0].hungSince = 4000;
+        cur[0] = prev[0]; cur[0].hung = FALSE; cur[0].hungSince = 0; cur[0].slow = TRUE;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(cur[0].hung && cur[0].hungSince == 4000);        /* hang continues */
+        cur[0].hung = FALSE; cur[0].slow = FALSE;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(!cur[0].hung && cur[0].hungSince == 0);          /* answered again */
     }
     {
         AppRow row = {0};
