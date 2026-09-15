@@ -566,6 +566,15 @@ static int PROC_CMP_DIR;
 static BOOL          s_holdOrder;
 static ProcHeldOrder s_heldOrder;
 
+static BOOL s_trackClient, s_trackNonClient;
+
+/* Whether a hold should continue: the pointer is still over any part of the
+   list, rows or scrollbar, or a button is down (a thumb drag may stray). */
+static BOOL ProcHoldKeeps(POINT cursor, const RECT *window, BOOL buttonDown)
+{
+    return buttonDown || PtInRect(window, cursor);
+}
+
 /* Rank comparison for a held order, 0 when not holding or both unseen. */
 static int ProcHeldCompare(const ProcRow *ra, const ProcRow *rb)
 {
@@ -833,29 +842,48 @@ static void ProcMarkDelta(const ProcRow *row, WCHAR *buf, size_t cch)
     }
 }
 
+/* Ends a hold once the pointer is really gone, and catches up on the order
+   at once rather than on the next tick. */
+static void ProcHoldCheck(HWND list, TabPage *p)
+{
+    POINT cursor;
+    RECT window;
+    if (!s_holdOrder || !list) return;
+    if (GetCursorPos(&cursor) && GetWindowRect(list, &window) &&
+        ProcHoldKeeps(cursor, &window, GetKeyState(VK_LBUTTON) < 0))
+        return;
+    s_holdOrder = FALSE;
+    ProcSnapshot(p);
+}
+
 static LRESULT CALLBACK ProcListHoverProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                           UINT_PTR id, DWORD_PTR ref)
 {
     switch (msg) {
     case WM_MOUSEMOVE:
-        if (!s_holdOrder) {
+    case WM_NCMOUSEMOVE: {
+        /* Rows and scrollbar are tracked separately: Windows reports
+           leaving each one on its own. */
+        BOOL nonClient = msg == WM_NCMOUSEMOVE;
+        BOOL *tracked = nonClient ? &s_trackNonClient : &s_trackClient;
+        if (!*tracked) {
             TRACKMOUSEEVENT tme;
             tme.cbSize = sizeof(tme);
-            tme.dwFlags = TME_LEAVE;
+            tme.dwFlags = TME_LEAVE | (nonClient ? TME_NONCLIENT : 0);
             tme.hwndTrack = hwnd;
             tme.dwHoverTime = 0;
-            if (TrackMouseEvent(&tme)) s_holdOrder = TRUE;
+            *tracked = TrackMouseEvent(&tme);
         }
+        if (*tracked) s_holdOrder = TRUE;
         break;
+    }
     case WM_MOUSELEAVE:
-        if (s_holdOrder) {
-            s_holdOrder = FALSE;
-            /* Catch up on the order at once rather than on the next tick. */
-            ProcSnapshot((TabPage *)ref);
-        }
+    case WM_NCMOUSELEAVE:
+        if (msg == WM_MOUSELEAVE) s_trackClient = FALSE; else s_trackNonClient = FALSE;
+        ProcHoldCheck(hwnd, (TabPage *)ref);
         break;
     case WM_NCDESTROY:
-        s_holdOrder = FALSE;
+        s_holdOrder = s_trackClient = s_trackNonClient = FALSE;
         RemoveWindowSubclass(hwnd, ProcListHoverProc, id);
         break;
     default:
@@ -1143,6 +1171,16 @@ static void ProcSnapshot(TabPage *p)
     BOOL requestedSelection = s_pendingPid != 0;
 
     (void)p;
+
+    /* A leave can go unreported, for instance when a thumb drag ends outside
+       the list, so each snapshot re-checks before it sorts. */
+    if (s_holdOrder && s_list) {
+        POINT cursor;
+        RECT window;
+        if (GetCursorPos(&cursor) && GetWindowRect(s_list, &window) &&
+            !ProcHoldKeeps(cursor, &window, GetKeyState(VK_LBUTTON) < 0))
+            s_holdOrder = FALSE;
+    }
 
     /* remember selection */
     if (s_list && g_viewCnt > 0) {

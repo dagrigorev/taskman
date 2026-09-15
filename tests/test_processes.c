@@ -354,6 +354,17 @@ int main(void)
             CHECK(ProcTreeCompare(&b, &tb, &a, &ta) < 0);
             ProcOrder_Free(&s_heldOrder);
             g_sortCol = 2; g_sortDir = -1;
+            {
+                /* The hold survives moving between the rows and the
+                   scrollbar, and a thumb drag that strays outside, but
+                   not a pointer that has really left. */
+                RECT win = { 100, 100, 400, 300 };
+                POINT inside = { 395, 150 }, outside = { 450, 150 }, edge = { 400, 150 };
+                CHECK(ProcHoldKeeps(inside, &win, FALSE));
+                CHECK(!ProcHoldKeeps(outside, &win, FALSE));
+                CHECK(!ProcHoldKeeps(edge, &win, FALSE));       /* right edge is exclusive */
+                CHECK(ProcHoldKeeps(outside, &win, TRUE));      /* dragging the thumb */
+            }
         }
         ProcDiff_Free(&s_mark);
         ProcMarkDelta(&now, text, ARRAYSIZE(text));
