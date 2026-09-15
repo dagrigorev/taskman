@@ -29,8 +29,10 @@ static int WINAPI captureConfirm(HWND h,LPCWSTR text,LPCWSTR caption,UINT flags)
 { (void)h;(void)text;(void)caption;(void)flags;return confirmAnswer; }
 static BOOL WINAPI capturePost(HWND h,UINT m,WPARAM w,LPARAM l)
 { (void)m;(void)w;(void)l;actionTarget=h;++actionCount;return TRUE; }
+static int probeCount;
 static LRESULT WINAPI probe(HWND h,UINT m,WPARAM w,LPARAM l,UINT flags,UINT timeout,PDWORD_PTR result)
 {
+    if (m == WM_NULL) ++probeCount;
     if (simulateTimeout && m == WM_NULL) { SetLastError(ERROR_TIMEOUT); return 0; }
     return SendMessageTimeoutW(h,m,w,l,flags,timeout,result);
 }
@@ -116,7 +118,18 @@ int main(void)
             for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hwnd == hung.hwnd) row = i;
             CHECK(row >= 0);
             if (row >= 0) CHECK(g_shared[row].hung && g_shared[row].hungSince != 0);
+            CHECK(Apps_HungCount() >= 1);
+            {
+                /* Off the Applications tab the watch keeps the hang's start
+                   without messaging any window: a probe could stall on a
+                   hung one, and nobody is looking at the rows. */
+                g_shared[row >= 0 ? row : 0].hung = TRUE;   /* as if IsHungAppWindow agreed */
+                probeCount = 0;
+                Apps_Watch();
+                CHECK(probeCount == 0);
+            }
             Apps_Reset();
+            CHECK(Apps_HungCount() == 0);
         }
         SetEvent(hung.stop);
         CHECK(WaitForSingleObject(thread,2000) == WAIT_OBJECT_0);
@@ -274,6 +287,16 @@ int main(void)
         row.hungSince = 0;                      /* unknown start: no duration */
         app_formatStatus(&row, 4000000, text, ARRAYSIZE(text));
         CHECK(!lstrcmpW(text, L"Not Responding"));
+    }
+    {
+        /* The watch path keeps a hang continuous when IsHungAppWindow says
+           so, and never promotes a merely slow row (it does not probe). */
+        AppRow prev[1] = {0}, cur[1] = {0};
+        prev[0].hwnd = (HWND)8; prev[0].pid = 80; prev[0].tid = 81;
+        prev[0].hung = TRUE; prev[0].hungSince = 2000;
+        cur[0] = prev[0]; cur[0].hungSince = 0;
+        app_trackHangs(cur, 1, prev, 1, 9000, 10000);
+        CHECK(cur[0].hungSince == 2000);
     }
     {
         /* Longest hang sorts first when the Status column is descending. */

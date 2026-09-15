@@ -300,6 +300,16 @@ int main(void)
     Capture(hwnd, L"tests/.build/workspace-sensors.bmp");
     SwitchToTab(TAB_PROCESSES, FALSE); Pump(60);
     CHECK(!Gpu_IsEnabled());
+    {
+        /* The left status part calls out hung applications on every tab. */
+        WCHAR status[160];
+        FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 42, 0);
+        CHECK(!lstrcmpW(status, L"  LIVE   |   42 processes   |   F5 refresh   Ctrl+F search"));
+        FormatStatusLeft(status, ARRAYSIZE(status), TRUE, 42, 1);
+        CHECK(!lstrcmpW(status, L"  PAUSED   |   42 processes   |   1 app not responding (click to view)"));
+        FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 7, 3);
+        CHECK(!lstrcmpW(status, L"  LIVE   |   7 processes   |   3 apps not responding (click to view)"));
+    }
     SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
     Capture(hwnd, L"tests/.build/workspace-performance.bmp");
     {

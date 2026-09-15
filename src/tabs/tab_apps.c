@@ -104,7 +104,7 @@ static void app_formatStatus(const AppRow *row, ULONGLONG now, WCHAR *buf, size_
 
 /* ------------------------------------------------------ enumeration ----- */
 
-typedef struct { AppRow *buf; int cnt; int cap; ULONGLONG start; BOOL failed; } EnumCtx;
+typedef struct { AppRow *buf; int cnt; int cap; ULONGLONG start; BOOL failed; BOOL noProbe; } EnumCtx;
 
 static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
 {
@@ -171,7 +171,7 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
        collector thread, so a hung UI thread of ours is exactly as
        detectable -- and as worth reporting -- as any other application's.
        Only the caption read above avoids messaging our own thread. */
-    if (!row->hung && GetTickCount64() - ctx->start < APP_PROBE_BUDGET_MS) {
+    if (!row->hung && !ctx->noProbe && GetTickCount64() - ctx->start < APP_PROBE_BUDGET_MS) {
         SetLastError(ERROR_SUCCESS);
         if (!SendMessageTimeoutW(hwnd, WM_NULL, 0, 0,
                 SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, 10, &response))
@@ -180,13 +180,14 @@ static BOOL CALLBACK EnumTopLevel(HWND hwnd, LPARAM lp)
     return TRUE;
 }
 
-void Apps_Collect(void)
+static void app_collect(BOOL probe)
 {
     EnumCtx ctx;
     AppRow *old;
 
     ZeroMemory(&ctx, sizeof(ctx));
     ctx.start = GetTickCount64();
+    ctx.noProbe = !probe;
     EnumWindows(EnumTopLevel, (LPARAM)&ctx);
     if (ctx.failed) { free(ctx.buf); return; }
     /* g_shared is only ever replaced on this thread, so reading it here
@@ -204,6 +205,25 @@ void Apps_Collect(void)
     ReleaseSRWLockExclusive(&g_appsLock);
 
     free(old);
+}
+
+void Apps_Collect(void)
+{
+    app_collect(TRUE);
+}
+
+void Apps_Watch(void)
+{
+    app_collect(FALSE);
+}
+
+int Apps_HungCount(void)
+{
+    int i, hung = 0;
+    AcquireSRWLockShared(&g_appsLock);
+    for (i = 0; i < g_sharedCnt; ++i) if (g_shared[i].hung) ++hung;
+    ReleaseSRWLockShared(&g_appsLock);
+    return hung;
 }
 
 void Apps_Reset(void)

@@ -44,7 +44,10 @@ dependencies beyond what ships with Windows.
   `Not Responding (2m 05s)`, and sorts the longest hang first on the Status column.
   End Task on a hung window offers to end its process, since a hung window cannot
   process a close request. Go to Process opens the owning process. DWM's ghost
-  copies of hung windows are not listed.
+  copies of hung windows are not listed. A single slow reply is not a hang: a window
+  must miss two samples in a row, or be flagged by Windows itself. On other tabs
+  a lighter watch keeps hang timers running without messaging any window, and
+  the status bar reads `1 app not responding (click to view)`.
 - Alternating table rows, CPU/memory cell shading, styled navigation, and
   scalable fonts and columns make large snapshots easier to scan. PID 0 (idle
   capacity) is excluded from the process table and its resource totals.

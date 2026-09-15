@@ -1035,6 +1035,9 @@ static void TabCollect(int tab)
        current by the time the page reads it. */
     default: break;
     }
+    /* Every other tab keeps hang timers running and feeds the status bar
+       notice; it only enumerates captions, without probing windows. */
+    if (tab != TAB_APPS) Apps_Watch();
 }
 
 static void SwitchToTab(int index, BOOL force)
@@ -1198,6 +1201,20 @@ static void ToggleTinyFootprint(void)
 
 /* ----------------------------------------------------------- wnd proc --- */
 
+/* The left status part. A hung application is called out on every tab,
+   and clicking the part while it is shown opens the Applications tab. */
+static void FormatStatusLeft(WCHAR *buf, size_t cch, BOOL paused, DWORD procs, int hung)
+{
+    StringCchPrintfW(buf, cch, L"  %s   |   %lu processes   |   ",
+                     paused ? L"PAUSED" : L"LIVE", (unsigned long)procs);
+    if (hung > 0)
+        StringCchPrintfW(buf + lstrlenW(buf), cch - (size_t)lstrlenW(buf),
+                         hung == 1 ? L"1 app not responding (click to view)"
+                                   : L"%d apps not responding (click to view)", hung);
+    else
+        StringCchCatW(buf, cch, L"F5 refresh   Ctrl+F search");
+}
+
 static void OnSnapshotReady(void)
 {
     const Snapshot *s = SysInfo_Lock();
@@ -1209,9 +1226,10 @@ static void OnSnapshotReady(void)
     UI_UpdateDashboard(g_hDashboard);
 
     if (!g_cfg.tiny) {
-        StringCchPrintfW(text, ARRAYSIZE(text), L"  %s   |   %lu processes   |   F5 refresh   Ctrl+F search",
-                         g_cfg.updateSpeed == SPEED_PAUSED ? L"PAUSED" : L"LIVE", (unsigned long)procs);
-        App_SetStatusText(0, text);
+        WCHAR left[160];
+        FormatStatusLeft(left, ARRAYSIZE(left), g_cfg.updateSpeed == SPEED_PAUSED,
+                         procs, Apps_HungCount());
+        App_SetStatusText(0, left);
         StringCchPrintfW(text, ARRAYSIZE(text), L"CPU Usage: %d%%",
                          (int)(cpu + 0.5));
         App_SetStatusText(1, text);
@@ -1487,6 +1505,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (nm->hwndFrom == g_hTabs && nm->code == (UINT)TCN_SELCHANGE) {
             SwitchToTab(TabCtrl_GetCurSel(g_hTabs), FALSE);
             return 0;
+        }
+        if (nm->hwndFrom == g_hStatus && nm->code == (UINT)NM_CLICK &&
+            ((NMMOUSE *)lp)->dwItemSpec == 0 && Apps_HungCount() > 0) {
+            SwitchToTab(TAB_APPS, FALSE);
+            return TRUE;
         }
         break;
     }
