@@ -11,7 +11,7 @@
 
 #define STARTUP_NAME_MAX    128
 #define STARTUP_COMMAND_MAX 1024
-#define STARTUP_MAX_ENTRIES 256
+#define STARTUP_MAX_ENTRIES 512
 #define STARTUP_MAX_PIDS    8
 
 typedef enum {
@@ -20,6 +20,8 @@ typedef enum {
     STARTUP_SOURCE_HKLM_RUN32,
     STARTUP_SOURCE_USER_FOLDER,
     STARTUP_SOURCE_COMMON_FOLDER,
+    STARTUP_SOURCE_SERVICE,         /* service set to start automatically   */
+    STARTUP_SOURCE_TASK,            /* scheduled task, at logon or boot     */
     STARTUP_SOURCE_COUNT
 } StartupSource;
 
@@ -29,6 +31,8 @@ typedef struct {
     WCHAR         exe[MAX_PATH];        /* resolved executable, "" if unknown */
     StartupSource source;
     BOOL          disabled;             /* switched off in StartupApproved   */
+    DWORD         servicePid;   /* service only: the pid the SCM reports, 0
+                                   when it is not running or not a service */
     /* Filled by Startup_Attribute. */
     int           running;
     DWORD         pids[STARTUP_MAX_PIDS];

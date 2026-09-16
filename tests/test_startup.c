@@ -174,7 +174,16 @@ int main(void)
     TestAttributeWithoutPaths();
     TestAttributeCapsPids();
     TestCompare();
-    CHECK(Startup_SourceName(STARTUP_SOURCE_HKCU_RUN)[0] != 0);
+    {
+        /* Every source names itself, and no two share a name. */
+        int a, b;
+        for (a = 0; a < STARTUP_SOURCE_COUNT; ++a) {
+            CHECK(Startup_SourceName((StartupSource)a)[0] != 0);
+            for (b = a + 1; b < STARTUP_SOURCE_COUNT; ++b)
+                CHECK(lstrcmpW(Startup_SourceName((StartupSource)a),
+                               Startup_SourceName((StartupSource)b)) != 0);
+        }
+    }
     CHECK(Startup_SourceName((StartupSource)99)[0] != 0);
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("test_startup: all passed\n");
