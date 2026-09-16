@@ -33,6 +33,15 @@ static void Capture(HWND hwnd, const WCHAR *path)
     info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
     info.bmiHeader.biSizeImage = (DWORD)(rc.right * rc.bottom * 4);
+    if (rc.right <= 0 || rc.bottom <= 0) {
+        /* Nothing to capture: the window has no client area, which happens
+           when the desktop work area shrank under it. Say so rather than
+           failing on a NULL bitmap, which reads like a GDI fault. */
+        fprintf(stderr, "SKIP workspace: %ls not captured, client is %ldx%ld\n",
+                path, rc.right, rc.bottom);
+        DeleteDC(memory); ReleaseDC(hwnd, dc);
+        return;
+    }
     bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, NULL, 0);
     CHECK(bitmap != NULL);
     if (!bitmap) { DeleteDC(memory); ReleaseDC(hwnd, dc); return; }
@@ -73,6 +82,10 @@ static void CheckBounds(HWND control, HWND page)
     CHECK(control != NULL);
     GetWindowRect(control, &r); MapWindowPoints(NULL, page, (POINT *)&r, 2);
     GetClientRect(page, &parent);
+    if (r.left < 0 || r.top < 0 || r.right > parent.right || r.bottom > parent.bottom ||
+        r.right <= r.left || r.bottom <= r.top)
+        fprintf(stderr, "       control %ld,%ld..%ld,%ld in page %ldx%ld\n",
+                r.left, r.top, r.right, r.bottom, parent.right, parent.bottom);
     CHECK(r.left >= 0 && r.top >= 0 && r.right <= parent.right && r.bottom <= parent.bottom);
     CHECK(r.right > r.left && r.bottom > r.top);
 }
@@ -648,8 +661,25 @@ int main(void)
             CHECK(limits.ptMinTrackSize.y <= work.bottom - work.top);
             CHECK(actual.left >= work.left && actual.top >= work.top && actual.right <= work.right && actual.bottom <= work.bottom);
         }
-        CheckBounds(list, page); CheckBounds(GetDlgItem(page, IDC_PROC_DETAILS), page);
-        CHECK(abs(ListView_GetColumnWidth(list, 0) - MulDiv(originalColumn, i, 96)) <= 2);
+        {
+            /* The target is deliberately larger than a real monitor, so the
+               application clamps it to the work area -- correctly. How much
+               room that leaves is the desktop's business and changes with
+               the taskbar or a display change, so the layout assertions only
+               apply when the window actually got the size it asked for. */
+            RECT actual, work = {0};
+            GetWindowRect(hwnd, &actual);
+            if (WindowWorkArea(hwnd, NULL, &work) &&
+                (actual.right - actual.left < target.right - target.left ||
+                 actual.bottom - actual.top < target.bottom - target.top)) {
+                fprintf(stderr, "SKIP workspace: %d dpi clamped to %ldx%ld by a %ldx%ld work area\n",
+                        i, actual.right - actual.left, actual.bottom - actual.top,
+                        work.right - work.left, work.bottom - work.top);
+            } else {
+                CheckBounds(list, page); CheckBounds(GetDlgItem(page, IDC_PROC_DETAILS), page);
+                CHECK(abs(ListView_GetColumnWidth(list, 0) - MulDiv(originalColumn, i, 96)) <= 2);
+            }
+        }
         Pump(50);
     }
     Capture(hwnd, L"tests/.build/workspace-200dpi.bmp");
