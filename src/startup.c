@@ -2,6 +2,7 @@
  * startup.c - startup entries and what their processes cost.
  * ------------------------------------------------------------------------ */
 #include "app.h"
+#include "ntapi.h"
 #include "startup.h"
 #include <shlobj.h>
 #include <tlhelp32.h>
@@ -108,9 +109,17 @@ void Startup_Attribute(StartupEntry *entries, int count,
         byName = wcschr(e->exe, L'\\') == NULL;
         for (j = 0; j < procCount; ++j) {
             const WCHAR *path = procs[j].path;
-            if (!path[0]) continue;
-            if (byName ? lstrcmpiW(PathFindFileNameW(path), e->exe) : lstrcmpiW(path, e->exe))
+            const WCHAR *name = procs[j].name;
+            /* Without a path on either side the name is all there is: an
+               elevated or protected process reports one but not the other,
+               and would otherwise read as not running. */
+            if (byName || !path[0]) {
+                const WCHAR *mine = byName ? e->exe : PathFindFileNameW(e->exe);
+                const WCHAR *theirs = path[0] ? PathFindFileNameW(path) : name;
+                if (!theirs[0] || lstrcmpiW(theirs, mine)) continue;
+            } else if (lstrcmpiW(path, e->exe)) {
                 continue;
+            }
             if (e->running < STARTUP_MAX_PIDS) e->pids[e->running] = procs[j].pid;
             ++e->running;
             e->cpuTime += procs[j].cpuTime;
@@ -289,12 +298,82 @@ int Startup_ReadEntries(StartupEntry *entries, int max)
     return count;
 }
 
-int Startup_ReadProcesses(StartupProcess *procs, int max)
+/* The native query reports every process, including those this program
+   cannot open, with their CPU time, private memory and image name. Only
+   the full path needs a handle, and it stays empty when there is none. */
+static int StartupReadNative(StartupProcess *procs, int max)
+{
+    PFN_NtQuerySystemInformation query = Nt_QuerySystemInformation();
+    const CTM_SYSTEM_PROCESS_INFORMATION *entry;
+    BYTE *buffer = NULL;
+    ULONG size = 512 * 1024, used = 0;
+    int count = 0, attempts;
+
+    if (!query) return 0;
+    for (attempts = 0; attempts < 8; ++attempts) {
+        CTM_NTSTATUS status;
+        ULONG needed = 0;
+        BYTE *grown = (BYTE *)realloc(buffer, size);
+        if (!grown) { free(buffer); return 0; }
+        buffer = grown;
+        status = query(CtmSystemProcessInformation, buffer, size, &needed);
+        if (NT_SUCCESS(status)) { used = needed; break; }
+        if (status != (CTM_NTSTATUS)0xC0000004L || size >= 64 * 1024 * 1024) {
+            free(buffer);
+            return 0;
+        }
+        size = needed > size ? needed + 65536 : size * 2;
+    }
+    if (!used || used < sizeof(*entry)) { free(buffer); return 0; }
+
+    entry = (const CTM_SYSTEM_PROCESS_INFORMATION *)buffer;
+    for (;;) {
+        DWORD pid = (DWORD)(ULONG_PTR)entry->UniqueProcessId;
+        if (pid && count < max) {
+            StartupProcess *p = &procs[count++];
+            HANDLE process;
+            ZeroMemory(p, sizeof(*p));
+            p->pid = pid;
+            p->cpuTime = (ULONGLONG)entry->KernelTime.QuadPart + (ULONGLONG)entry->UserTime.QuadPart;
+            if (entry->WorkingSetPrivateSize.QuadPart > 0)
+                p->privateBytes = (ULONGLONG)entry->WorkingSetPrivateSize.QuadPart;
+            if (entry->ImageName.Buffer && entry->ImageName.Length) {
+                USHORT chars = entry->ImageName.Length / sizeof(WCHAR);
+                const BYTE *name = (const BYTE *)entry->ImageName.Buffer;
+                if (name >= buffer && name <= buffer + used &&
+                    (size_t)(buffer + used - name) >= entry->ImageName.Length) {
+                    if (chars >= STARTUP_NAME_MAX) chars = STARTUP_NAME_MAX - 1;
+                    memcpy(p->name, entry->ImageName.Buffer, chars * sizeof(WCHAR));
+                    p->name[chars] = L'\0';
+                }
+            }
+            process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (process) {
+                DWORD len = MAX_PATH;
+                if (!QueryFullProcessImageNameW(process, 0, p->path, &len)) p->path[0] = 0;
+                CloseHandle(process);
+            }
+        }
+        if (!entry->NextEntryOffset) break;
+        {
+            size_t remaining = used - (size_t)((const BYTE *)entry - buffer);
+            if (entry->NextEntryOffset < sizeof(*entry) || entry->NextEntryOffset > remaining ||
+                remaining - entry->NextEntryOffset < sizeof(*entry))
+                break;
+            entry = (const CTM_SYSTEM_PROCESS_INFORMATION *)((const BYTE *)entry + entry->NextEntryOffset);
+        }
+    }
+    free(buffer);
+    return count;
+}
+
+/* Documented fallback for when the native query is unavailable: it only
+   reaches processes this program can open. */
+static int StartupReadToolhelp(StartupProcess *procs, int max)
 {
     HANDLE snapshot;
     PROCESSENTRY32W pe;
     int count = 0;
-    if (!procs || max <= 0) return 0;
     snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return 0;
     ZeroMemory(&pe, sizeof(pe));
@@ -305,14 +384,15 @@ int Startup_ReadProcesses(StartupProcess *procs, int max)
             HANDLE process;
             DWORD len = MAX_PATH;
             if (!pe.th32ProcessID || count >= max) continue;
-            process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
-            if (!process) continue;
             p = &procs[count];
             ZeroMemory(p, sizeof(*p));
             p->pid = pe.th32ProcessID;
-            if (QueryFullProcessImageNameW(process, 0, p->path, &len)) {
+            StringCchCopyW(p->name, ARRAYSIZE(p->name), pe.szExeFile);
+            process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (process) {
                 FILETIME c, e, k, u;
                 PROCESS_MEMORY_COUNTERS_EX memory;
+                if (!QueryFullProcessImageNameW(process, 0, p->path, &len)) p->path[0] = 0;
                 if (GetProcessTimes(process, &c, &e, &k, &u))
                     p->cpuTime = (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime) +
                                  (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
@@ -320,11 +400,19 @@ int Startup_ReadProcesses(StartupProcess *procs, int max)
                 memory.cb = sizeof(memory);
                 if (GetProcessMemoryInfo(process, (PROCESS_MEMORY_COUNTERS *)&memory, sizeof(memory)))
                     p->privateBytes = memory.PrivateUsage;
-                ++count;
+                CloseHandle(process);
             }
-            CloseHandle(process);
+            ++count;
         } while (Process32NextW(snapshot, &pe));
     }
     CloseHandle(snapshot);
     return count;
+}
+
+int Startup_ReadProcesses(StartupProcess *procs, int max)
+{
+    int count;
+    if (!procs || max <= 0) return 0;
+    count = StartupReadNative(procs, max);
+    return count ? count : StartupReadToolhelp(procs, max);
 }

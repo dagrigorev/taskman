@@ -36,10 +36,14 @@ typedef struct {
     ULONGLONG     privateBytes;
 } StartupEntry;
 
-/* One running process, as attribution needs it. */
+/* One running process, as attribution needs it. A process that cannot be
+   opened -- anything elevated or protected, without those rights -- still
+   reports its pid, name, CPU time and memory through the native query; only
+   its full path is missing, and then the name is all there is to match on. */
 typedef struct {
     DWORD     pid;
-    WCHAR     path[MAX_PATH];
+    WCHAR     path[MAX_PATH];       /* "" when the process cannot be opened */
+    WCHAR     name[STARTUP_NAME_MAX];
     ULONGLONG cpuTime;
     ULONGLONG privateBytes;
 } StartupProcess;
@@ -60,8 +64,10 @@ BOOL Startup_ExeFromCommand(const WCHAR *command, StartupExistsFn exists,
    absent or empty value means enabled. */
 BOOL Startup_IsDisabled(const BYTE *approved, DWORD size);
 
-/* Matches processes to entries by full image path, case-insensitively, or
-   by file name when the entry has no directory. Resets and fills the
+/* Matches processes to entries by full image path, case-insensitively.
+   When either side has no path -- a bare Run value, or a process that could
+   not be opened -- the file name is matched instead, which can credit a
+   different program of the same name. Resets and fills the
    running/pids/cpuTime/privateBytes fields. */
 void Startup_Attribute(StartupEntry *entries, int count,
                        const StartupProcess *procs, int procCount);
