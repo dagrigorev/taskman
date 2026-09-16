@@ -77,6 +77,21 @@ static void CheckBounds(HWND control, HWND page)
     CHECK(r.right > r.left && r.bottom > r.top);
 }
 
+/* A window whose thread never pumps: the Applications tab reports it as
+   not responding, which is what puts the notice in the status bar. */
+typedef struct { HANDLE ready, stop; HWND hwnd; } HungWindow;
+static DWORD WINAPI HungWindowThread(void *arg)
+{
+    HungWindow *f = (HungWindow *)arg;
+    f->hwnd = CreateWindowExW(0, L"STATIC", L"Taskman workspace hang fixture",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, -30000, -30000, 120, 90,
+        NULL, NULL, GetModuleHandleW(NULL), NULL);
+    SetEvent(f->ready);
+    WaitForSingleObject(f->stop, INFINITE);
+    DestroyWindow(f->hwnd);
+    return 0;
+}
+
 int main(void)
 {
     WNDCLASSEXW cls = {0};
@@ -325,6 +340,56 @@ int main(void)
         CHECK(!lstrcmpW(status, L"  PAUSED   |   42 processes   |   1 app not responding (click to view)"));
         FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 7, 3);
         CHECK(!lstrcmpW(status, L"  LIVE   |   7 processes   |   3 apps not responding (click to view)"));
+    }
+    {
+        /* A hung window is called out in the status bar on every tab, and
+           clicking that part opens the Applications tab. The click cannot be
+           driven through the screen here: capturing the desktop stalls while
+           a hung window is on it, so the notification the status bar would
+           send is posted directly. */
+        HungWindow hung = {0};
+        HANDLE thread;
+        hung.ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+        hung.stop  = CreateEventW(NULL, TRUE, FALSE, NULL);
+        thread = CreateThread(NULL, 0, HungWindowThread, &hung, 0, NULL);
+        CHECK(thread != NULL);
+        CHECK(WaitForSingleObject(hung.ready, 2000) == WAIT_OBJECT_0);
+        /* Leave the Applications tab first: the watch that runs on other
+           tabs trusts IsHungAppWindow alone, which needs five seconds, so
+           it would clear a hang this young before the click arrives. */
+        SwitchToTab(TAB_PERFORMANCE, FALSE); Pump(60);
+        CHECK(g_active == TAB_PERFORMANCE);
+        /* Two collections: one slow probe alone is not a hang. */
+        Apps_Collect();
+        Apps_Collect();
+        CHECK(Apps_HungCount() > 0);
+        {
+            WCHAR status[160];
+            FormatStatusLeft(status, ARRAYSIZE(status), FALSE, 1, Apps_HungCount());
+            CHECK(wcsstr(status, L"not responding (click to view)") != NULL);
+        }
+        {
+            NMMOUSE click;
+            ZeroMemory(&click, sizeof(click));
+            click.hdr.hwndFrom = g_hStatus;
+            click.hdr.idFrom = 0;
+            click.hdr.code = NM_CLICK;
+            click.dwItemSpec = 0;                  /* the left part */
+            SendMessageW(hwnd, WM_NOTIFY, 0, (LPARAM)&click);
+            Pump(60);
+            CHECK(g_active == TAB_APPS);
+            /* Any other part is not the notice and must not switch tabs. */
+            SwitchToTab(TAB_PERFORMANCE, FALSE);
+            Apps_Collect(); Apps_Collect();
+            click.dwItemSpec = 2;
+            SendMessageW(hwnd, WM_NOTIFY, 0, (LPARAM)&click);
+            Pump(60);
+            CHECK(g_active == TAB_PERFORMANCE);
+        }
+        SetEvent(hung.stop);
+        CHECK(WaitForSingleObject(thread, 3000) == WAIT_OBJECT_0);
+        CloseHandle(thread); CloseHandle(hung.ready); CloseHandle(hung.stop);
+        Apps_Collect();
     }
     {
         /* File > Startup Impact opens one modeless window, fills it with every
