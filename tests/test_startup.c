@@ -1,7 +1,15 @@
 /* Exercises startup command parsing and attribution with synthetic data. */
 #include "../include/app.h"
 #include "../include/startup.h"
+#include "../include/ntapi.h"
 #include <stdio.h>
+
+/* The real one lives in sysinfo.c, which this suite does not link. */
+PFN_NtQuerySystemInformation Nt_QuerySystemInformation(void)
+{
+    return (PFN_NtQuerySystemInformation)(void *)
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
+}
 #include "../src/startup.c"
 
 static int failures;
@@ -66,6 +74,19 @@ static StartupProcess Proc(DWORD pid, const WCHAR *path, ULONGLONG cpu, ULONGLON
     ZeroMemory(&p, sizeof(p));
     p.pid = pid;
     StringCchCopyW(p.path, ARRAYSIZE(p.path), path);
+    StringCchCopyW(p.name, ARRAYSIZE(p.name), PathFindFileNameW(path));
+    p.cpuTime = cpu;
+    p.privateBytes = bytes;
+    return p;
+}
+
+/* A process whose path could not be read: elevated, or protected. */
+static StartupProcess ProcNoPath(DWORD pid, const WCHAR *name, ULONGLONG cpu, ULONGLONG bytes)
+{
+    StartupProcess p;
+    ZeroMemory(&p, sizeof(p));
+    p.pid = pid;
+    StringCchCopyW(p.name, ARRAYSIZE(p.name), name);
     p.cpuTime = cpu;
     p.privateBytes = bytes;
     return p;
@@ -85,7 +106,7 @@ static void TestAttribute(void)
     p[1] = Proc(11, L"C:\\Program Files\\Acme App\\acme.exe", 50, 500);
     p[2] = Proc(12, L"C:\\Windows\\System32\\ctfmon.exe", 7, 70);
     p[3] = Proc(13, L"C:\\Other\\acme.exe", 1, 1);     /* same name, other path */
-    p[4] = Proc(14, L"", 1, 1);                        /* no path known */
+    p[4] = Proc(14, L"", 1, 1);                        /* nothing known at all */
 
     Startup_Attribute(e, 3, p, 5);
     CHECK(e[0].running == 2);
@@ -93,6 +114,24 @@ static void TestAttribute(void)
     CHECK(e[0].cpuTime == 150 && e[0].privateBytes == 1500);
     CHECK(e[1].running == 1 && e[1].pids[0] == 12 && e[1].cpuTime == 7);
     CHECK(e[2].running == 0 && e[2].cpuTime == 0);
+}
+
+/* Elevated and protected processes report no path, so they are credited on
+   their name; that is what keeps them from reading as "Not running". */
+static void TestAttributeWithoutPaths(void)
+{
+    StartupEntry e[2];
+    StartupProcess p[3];
+    ZeroMemory(e, sizeof(e));
+    StringCchCopyW(e[0].exe, MAX_PATH, L"C:\\Windows\\System32\\guarded.exe");
+    StringCchCopyW(e[1].exe, MAX_PATH, L"C:\\Tools\\tray.exe");
+    p[0] = ProcNoPath(20, L"guarded.exe", 9, 90);
+    p[1] = ProcNoPath(21, L"other.exe", 5, 50);
+    p[2] = ProcNoPath(22, L"GUARDED.EXE", 1, 10);      /* case-insensitive */
+    Startup_Attribute(e, 2, p, 3);
+    CHECK(e[0].running == 2 && e[0].cpuTime == 10 && e[0].privateBytes == 100);
+    CHECK(e[0].pids[0] == 20 && e[0].pids[1] == 22);
+    CHECK(e[1].running == 0);
 }
 
 static void TestAttributeCapsPids(void)
@@ -132,9 +171,19 @@ int main(void)
     TestExeFromCommand();
     TestIsDisabled();
     TestAttribute();
+    TestAttributeWithoutPaths();
     TestAttributeCapsPids();
     TestCompare();
-    CHECK(Startup_SourceName(STARTUP_SOURCE_HKCU_RUN)[0] != 0);
+    {
+        /* Every source names itself, and no two share a name. */
+        int a, b;
+        for (a = 0; a < STARTUP_SOURCE_COUNT; ++a) {
+            CHECK(Startup_SourceName((StartupSource)a)[0] != 0);
+            for (b = a + 1; b < STARTUP_SOURCE_COUNT; ++b)
+                CHECK(lstrcmpW(Startup_SourceName((StartupSource)a),
+                               Startup_SourceName((StartupSource)b)) != 0);
+        }
+    }
     CHECK(Startup_SourceName((StartupSource)99)[0] != 0);
     if (failures) { printf("%d failure(s)\n", failures); return 1; }
     printf("test_startup: all passed\n");

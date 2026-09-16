@@ -41,6 +41,8 @@ target_link_libraries(taskman_platform INTERFACE
     # uuid supplies CLSID_ShellLink and IID_IShellLinkW for resolving Startup
     # folder shortcuts.
     uuid
+    # taskschd supplies CLSID_TaskScheduler and the ITask* interface ids.
+    taskschd
     wbemuuid)
 if(MSVC)
     target_include_directories(taskman_platform INTERFACE

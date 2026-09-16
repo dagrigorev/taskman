@@ -11,7 +11,7 @@
 
 #define STARTUP_NAME_MAX    128
 #define STARTUP_COMMAND_MAX 1024
-#define STARTUP_MAX_ENTRIES 256
+#define STARTUP_MAX_ENTRIES 512
 #define STARTUP_MAX_PIDS    8
 
 typedef enum {
@@ -20,6 +20,8 @@ typedef enum {
     STARTUP_SOURCE_HKLM_RUN32,
     STARTUP_SOURCE_USER_FOLDER,
     STARTUP_SOURCE_COMMON_FOLDER,
+    STARTUP_SOURCE_SERVICE,         /* service set to start automatically   */
+    STARTUP_SOURCE_TASK,            /* scheduled task, at logon or boot     */
     STARTUP_SOURCE_COUNT
 } StartupSource;
 
@@ -29,6 +31,8 @@ typedef struct {
     WCHAR         exe[MAX_PATH];        /* resolved executable, "" if unknown */
     StartupSource source;
     BOOL          disabled;             /* switched off in StartupApproved   */
+    DWORD         servicePid;   /* service only: the pid the SCM reports, 0
+                                   when it is not running or not a service */
     /* Filled by Startup_Attribute. */
     int           running;
     DWORD         pids[STARTUP_MAX_PIDS];
@@ -36,10 +40,14 @@ typedef struct {
     ULONGLONG     privateBytes;
 } StartupEntry;
 
-/* One running process, as attribution needs it. */
+/* One running process, as attribution needs it. A process that cannot be
+   opened -- anything elevated or protected, without those rights -- still
+   reports its pid, name, CPU time and memory through the native query; only
+   its full path is missing, and then the name is all there is to match on. */
 typedef struct {
     DWORD     pid;
-    WCHAR     path[MAX_PATH];
+    WCHAR     path[MAX_PATH];       /* "" when the process cannot be opened */
+    WCHAR     name[STARTUP_NAME_MAX];
     ULONGLONG cpuTime;
     ULONGLONG privateBytes;
 } StartupProcess;
@@ -60,8 +68,10 @@ BOOL Startup_ExeFromCommand(const WCHAR *command, StartupExistsFn exists,
    absent or empty value means enabled. */
 BOOL Startup_IsDisabled(const BYTE *approved, DWORD size);
 
-/* Matches processes to entries by full image path, case-insensitively, or
-   by file name when the entry has no directory. Resets and fills the
+/* Matches processes to entries by full image path, case-insensitively.
+   When either side has no path -- a bare Run value, or a process that could
+   not be opened -- the file name is matched instead, which can credit a
+   different program of the same name. Resets and fills the
    running/pids/cpuTime/privateBytes fields. */
 void Startup_Attribute(StartupEntry *entries, int count,
                        const StartupProcess *procs, int procCount);
