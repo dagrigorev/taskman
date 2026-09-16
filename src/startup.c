@@ -27,9 +27,15 @@ BOOL Startup_ExeFromCommand(const WCHAR *command, StartupExistsFn exists,
     if (!out || !cch) return FALSE;
     out[0] = 0;
     if (!command) return FALSE;
-    if (!ExpandEnvironmentStringsW(command, expanded, ARRAYSIZE(expanded)) ||
-        expanded[ARRAYSIZE(expanded) - 1] != 0)
-        StringCchCopyW(expanded, ARRAYSIZE(expanded), command);
+    {
+        /* The return counts the terminator, and is what it WOULD need when
+           the buffer is too small, so a truncating call is caught here.
+           Testing the buffer's last character instead would read whatever
+           the call left untouched. */
+        DWORD needed = ExpandEnvironmentStringsW(command, expanded, ARRAYSIZE(expanded));
+        if (!needed || needed > ARRAYSIZE(expanded))
+            StringCchCopyW(expanded, ARRAYSIZE(expanded), command);
+    }
 
     start = expanded;
     while (iswspace(*start)) ++start;
@@ -242,8 +248,8 @@ static int StartupReadFolder(StartupEntry *entries, int count, int max, REFKNOWN
                 WCHAR args[512];
                 if (StartupResolveLink(full, e->exe, ARRAYSIZE(e->exe), args, ARRAYSIZE(args))) {
                     WCHAR expanded[MAX_PATH];
-                    if (ExpandEnvironmentStringsW(e->exe, expanded, ARRAYSIZE(expanded)) &&
-                        expanded[ARRAYSIZE(expanded) - 1] == 0)
+                    DWORD needed = ExpandEnvironmentStringsW(e->exe, expanded, ARRAYSIZE(expanded));
+                    if (needed && needed <= ARRAYSIZE(expanded))
                         StringCchCopyW(e->exe, ARRAYSIZE(e->exe), expanded);
                     StringCchPrintfW(e->command, ARRAYSIZE(e->command),
                                      args[0] ? L"\"%s\" %s" : L"\"%s\"", e->exe, args);
