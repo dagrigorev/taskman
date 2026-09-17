@@ -1,0 +1,53 @@
+name: Windows build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.toolchain }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [msvc, mingw]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Install MinGW-w64
+        if: matrix.toolchain == 'mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils
+
+      - name: Add MinGW-w64 to PATH
+        if: matrix.toolchain == 'mingw'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "${{ runner.temp }}\msys64\ucrt64\bin"
+
+      - name: Build and test
+        shell: pwsh
+        run: .\build.ps1 test -Toolchain ${{ matrix.toolchain }} -Strict
+
+      - name: Upload taskman.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskman-${{ matrix.toolchain }}
+          path: build/taskman.exe
+          if-no-files-found: error
